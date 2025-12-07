@@ -8,6 +8,7 @@ import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 import structlog
+import json
 
 logger = structlog.get_logger()
 
@@ -55,13 +56,37 @@ class FeatureWriter:
         
         filepath = self.output_path / filename
         
-        # Write using Polars (simpler)
-        df.write_parquet(
-            filepath,
-            compression="zstd",
-            compression_level=self.compression_level,
-            row_group_size=self.row_group_size,
-        )
+        # Basic validation
+        if "midprice" not in df.columns:
+            logger.warning("midprice_missing", file=str(filepath))
+        if "spread_bps" in df.columns:
+            try:
+                max_spread = float(df["spread_bps"].max())
+                if max_spread > 10000:
+                    logger.warning("abnormal_spread_bps", file=str(filepath), max_spread=max_spread)
+            except Exception:
+                pass
+
+        # Write using Arrow so we can attach metadata
+        metadata = {
+            "midas_version": "2.0",
+            "created_at": datetime.utcnow().isoformat(),
+            "row_count": len(df),
+        }
+
+        try:
+            table = pa.Table.from_batches(list(df.to_arrow().to_batches()))
+            raw_md = {k: json.dumps(v).encode("utf8") for k, v in metadata.items()}
+            table = table.replace_schema_metadata(raw_md)
+            pq.write_table(table, filepath, compression=self.compression, compression_level=self.compression_level, row_group_size=self.row_group_size)
+        except Exception:
+            # Fallback to Polars
+            df.write_parquet(
+                filepath,
+                compression=self.compression,
+                compression_level=self.compression_level,
+                row_group_size=self.row_group_size,
+            )
         
         self._files_written += 1
         self._rows_written += len(df)

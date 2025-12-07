@@ -1,16 +1,22 @@
-//! MIDAS Collector - High-performance Binance WebSocket data collector
+//! MIDAS Collector v2.0 - High-performance Binance WebSocket data collector
 //!
-//! Collects L2 order book depth and trade streams from Binance Futures.
-//! Stores raw messages in ZSTD-compressed JSONL format with automatic file rotation.
+//! Collects L2 order book depth, trade, liquidation, and kline streams from Binance Futures.
+//! Features:
+//! - Sequence validation with internal order book state
+//! - Bounded mpsc channel for backpressure
+//! - Buffered writes to reduce syscalls
+//! - Rich metadata (connection info, dropped message counters)
+//! - Optional stream types (trades, liquidations, klines)
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,7 +26,10 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 use zstd::stream::write::Encoder as ZstdEncoder;
 
-/// Configuration loaded from environment variables
+// ============================================
+// Configuration
+// ============================================
+
 #[derive(Debug, Clone)]
 struct Config {
     symbol: String,
@@ -28,7 +37,16 @@ struct Config {
     file_rotation_hours: u64,
     file_rotation_bytes: u64,
     reconnect_delay_secs: u64,
-    max_reconnect_attempts: u32, // 0 = infinite
+    max_reconnect_attempts: u32,
+    // Optional streams
+    enable_trades: bool,
+    enable_liquidations: bool,
+    enable_klines: bool,
+    kline_interval: String,
+    // Channel buffer size for backpressure
+    channel_buffer_size: usize,
+    // Write buffer size
+    write_buffer_size: usize,
 }
 
 impl Config {
@@ -46,9 +64,7 @@ impl Config {
                 .unwrap_or_else(|_| "1".to_string())
                 .parse::<u64>()
                 .unwrap_or(1)
-                * 1024
-                * 1024
-                * 1024,
+                * 1024 * 1024 * 1024,
             reconnect_delay_secs: env::var("RECONNECT_DELAY_SECS")
                 .unwrap_or_else(|_| "5".to_string())
                 .parse()
@@ -57,11 +73,36 @@ impl Config {
                 .unwrap_or_else(|_| "0".to_string())
                 .parse()
                 .unwrap_or(0),
+            enable_trades: env::var("ENABLE_TRADES")
+                .unwrap_or_else(|_| "true".to_string())
+                .parse()
+                .unwrap_or(true),
+            enable_liquidations: env::var("ENABLE_LIQUIDATIONS")
+                .unwrap_or_else(|_| "false".to_string())
+                .parse()
+                .unwrap_or(false),
+            enable_klines: env::var("ENABLE_KLINES")
+                .unwrap_or_else(|_| "false".to_string())
+                .parse()
+                .unwrap_or(false),
+            kline_interval: env::var("KLINE_INTERVAL")
+                .unwrap_or_else(|_| "1m".to_string()),
+            channel_buffer_size: env::var("CHANNEL_BUFFER_SIZE")
+                .unwrap_or_else(|_| "100000".to_string())
+                .parse()
+                .unwrap_or(100_000),
+            write_buffer_size: env::var("WRITE_BUFFER_SIZE")
+                .unwrap_or_else(|_| "2097152".to_string())
+                .parse()
+                .unwrap_or(2 * 1024 * 1024),
         })
     }
 }
 
-/// Raw depth update from Binance
+// ============================================
+// Binance Message Types
+// ============================================
+
 #[derive(Debug, Deserialize)]
 struct BinanceDepthUpdate {
     #[serde(rename = "e")]
@@ -84,7 +125,6 @@ struct BinanceDepthUpdate {
     asks: Vec<[String; 2]>,
 }
 
-/// Raw trade from Binance
 #[derive(Debug, Deserialize)]
 struct BinanceTrade {
     #[serde(rename = "e")]
@@ -105,14 +145,76 @@ struct BinanceTrade {
     buyer_is_maker: bool,
 }
 
-/// Combined stream message wrapper
+#[derive(Debug, Deserialize)]
+struct BinanceLiquidation {
+    #[serde(rename = "e")]
+    event_type: String,
+    #[serde(rename = "E")]
+    event_time: i64,
+    #[serde(rename = "o")]
+    order: LiquidationOrder,
+}
+
+#[derive(Debug, Deserialize)]
+struct LiquidationOrder {
+    #[serde(rename = "s")]
+    symbol: String,
+    #[serde(rename = "S")]
+    side: String,
+    #[serde(rename = "q")]
+    quantity: String,
+    #[serde(rename = "p")]
+    price: String,
+    #[serde(rename = "ap")]
+    avg_price: String,
+    #[serde(rename = "X")]
+    status: String,
+    #[serde(rename = "T")]
+    trade_time: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct BinanceKline {
+    #[serde(rename = "e")]
+    event_type: String,
+    #[serde(rename = "E")]
+    event_time: i64,
+    #[serde(rename = "s")]
+    symbol: String,
+    #[serde(rename = "k")]
+    kline: KlineData,
+}
+
+#[derive(Debug, Deserialize)]
+struct KlineData {
+    #[serde(rename = "i")]
+    interval: String,
+    #[serde(rename = "o")]
+    open: String,
+    #[serde(rename = "c")]
+    close: String,
+    #[serde(rename = "h")]
+    high: String,
+    #[serde(rename = "l")]
+    low: String,
+    #[serde(rename = "v")]
+    volume: String,
+    #[serde(rename = "n")]
+    trades: u64,
+    #[serde(rename = "x")]
+    is_final: bool,
+}
+
 #[derive(Debug, Deserialize)]
 struct StreamMessage {
     stream: String,
     data: serde_json::Value,
 }
 
-/// Normalized output record for storage
+// ============================================
+// Output Records
+// ============================================
+
 #[derive(Debug, Serialize)]
 struct OutputRecord {
     exchange_ts: i64,
@@ -132,6 +234,12 @@ struct OutputRecord {
     asks: Option<Vec<[String; 2]>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     trade: Option<TradeData>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    liquidation: Option<LiquidationData>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kline: Option<KlineOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    meta: Option<RecordMetadata>,
 }
 
 #[derive(Debug, Serialize)]
@@ -142,18 +250,175 @@ struct TradeData {
     buyer_is_maker: bool,
 }
 
-/// File writer with ZSTD compression and rotation
+#[derive(Debug, Serialize)]
+struct LiquidationData {
+    side: String,
+    price: String,
+    quantity: String,
+    avg_price: String,
+    status: String,
+}
+
+#[derive(Debug, Serialize)]
+struct KlineOutput {
+    interval: String,
+    open: String,
+    high: String,
+    low: String,
+    close: String,
+    volume: String,
+    trades: u64,
+    is_final: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct RecordMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sequence_gap: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_prev_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    book_crossed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    best_bid: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    best_ask: Option<f64>,
+}
+
+// ============================================
+// Internal Order Book State (for validation)
+// ============================================
+
+struct InternalOrderBook {
+    bids: BTreeMap<u64, f64>,
+    asks: BTreeMap<u64, f64>,
+    last_update_id: u64,
+    initialized: bool,
+}
+
+impl InternalOrderBook {
+    fn new() -> Self {
+        Self {
+            bids: BTreeMap::new(),
+            asks: BTreeMap::new(),
+            last_update_id: 0,
+            initialized: false,
+        }
+    }
+
+    fn price_to_key(price: &str) -> u64 {
+        let p: f64 = price.parse().unwrap_or(0.0);
+        (p * 100_000_000.0) as u64
+    }
+
+    fn apply_update(&mut self, depth: &BinanceDepthUpdate) -> (bool, Option<RecordMetadata>) {
+        let mut meta = RecordMetadata {
+            sequence_gap: None,
+            expected_prev_id: None,
+            book_crossed: None,
+            best_bid: None,
+            best_ask: None,
+        };
+
+        let has_gap = if self.initialized {
+            if depth.prev_last_update_id != self.last_update_id {
+                meta.sequence_gap = Some(true);
+                meta.expected_prev_id = Some(self.last_update_id);
+                true
+            } else {
+                false
+            }
+        } else {
+            self.initialized = true;
+            false
+        };
+
+        for [price_str, size_str] in &depth.bids {
+            let key = Self::price_to_key(price_str);
+            let size: f64 = size_str.parse().unwrap_or(0.0);
+            if size == 0.0 {
+                self.bids.remove(&key);
+            } else {
+                self.bids.insert(key, size);
+            }
+        }
+
+        for [price_str, size_str] in &depth.asks {
+            let key = Self::price_to_key(price_str);
+            let size: f64 = size_str.parse().unwrap_or(0.0);
+            if size == 0.0 {
+                self.asks.remove(&key);
+            } else {
+                self.asks.insert(key, size);
+            }
+        }
+
+        self.last_update_id = depth.last_update_id;
+
+        let best_bid = self.bids.keys().next_back().map(|&k| k as f64 / 100_000_000.0);
+        let best_ask = self.asks.keys().next().map(|&k| k as f64 / 100_000_000.0);
+
+        meta.best_bid = best_bid;
+        meta.best_ask = best_ask;
+
+        if let (Some(bb), Some(ba)) = (best_bid, best_ask) {
+            if bb >= ba {
+                meta.book_crossed = Some(true);
+            }
+        }
+
+        let has_issues = has_gap || meta.book_crossed.unwrap_or(false);
+        (has_issues, if has_issues || best_bid.is_some() { Some(meta) } else { None })
+    }
+
+    fn reset(&mut self) {
+        self.bids.clear();
+        self.asks.clear();
+        self.last_update_id = 0;
+        self.initialized = false;
+    }
+}
+
+// ============================================
+// Collector Statistics
+// ============================================
+
+#[derive(Debug, Default)]
+struct CollectorStats {
+    total_messages: AtomicU64,
+    depth_messages: AtomicU64,
+    trade_messages: AtomicU64,
+    liquidation_messages: AtomicU64,
+    kline_messages: AtomicU64,
+    sequence_gaps: AtomicU64,
+    crossed_books: AtomicU64,
+    dropped_messages: AtomicU64,
+    parse_errors: AtomicU64,
+    reconnections: AtomicU64,
+}
+
+impl CollectorStats {
+    fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+}
+
+// ============================================
+// Rotating Writer with Buffering
+// ============================================
+
 struct RotatingWriter {
     config: Config,
     current_file: Option<ZstdEncoder<'static, BufWriter<File>>>,
     current_path: PathBuf,
     file_start_time: Instant,
     bytes_written: u64,
-    total_messages: Arc<AtomicU64>,
+    stats: Arc<CollectorStats>,
+    connection_id: u64,
 }
 
 impl RotatingWriter {
-    fn new(config: Config, total_messages: Arc<AtomicU64>) -> Result<Self> {
+    fn new(config: Config, stats: Arc<CollectorStats>) -> Result<Self> {
         fs::create_dir_all(&config.raw_data_path)?;
         let mut writer = Self {
             config,
@@ -161,7 +426,8 @@ impl RotatingWriter {
             current_path: PathBuf::new(),
             file_start_time: Instant::now(),
             bytes_written: 0,
-            total_messages,
+            stats,
+            connection_id: 0,
         };
         writer.rotate_file()?;
         Ok(writer)
@@ -175,8 +441,11 @@ impl RotatingWriter {
     }
 
     fn rotate_file(&mut self) -> Result<()> {
-        // Finish and close current file
-        if let Some(encoder) = self.current_file.take() {
+        if let Some(mut encoder) = self.current_file.take() {
+            let footer = self.create_file_footer();
+            let footer_json = serde_json::to_string(&footer)?;
+            let footer_line = format!("{{\"_footer\":{}}}\n", footer_json);
+            encoder.write_all(footer_line.as_bytes())?;
             encoder.finish()?;
             info!(
                 "Closed file {:?} ({} bytes written)",
@@ -184,7 +453,6 @@ impl RotatingWriter {
             );
         }
 
-        // Create new file with timestamp
         let now: DateTime<Utc> = Utc::now();
         let filename = format!(
             "{}_{}.jsonl.zst",
@@ -200,15 +468,50 @@ impl RotatingWriter {
             .open(&self.current_path)
             .with_context(|| format!("Failed to create file: {:?}", self.current_path))?;
 
-        let buffered = BufWriter::with_capacity(1024 * 1024, file); // 1MB buffer
-        let encoder = ZstdEncoder::new(buffered, 3)?; // Compression level 3
+        let buffered = BufWriter::with_capacity(self.config.write_buffer_size, file);
+        let encoder = ZstdEncoder::new(buffered, 3)?;
 
         self.current_file = Some(encoder);
         self.file_start_time = Instant::now();
         self.bytes_written = 0;
 
+        let header = self.create_file_header();
+        self.write_raw(&serde_json::to_string(&header)?)?;
+
         info!("Created new data file: {:?}", self.current_path);
         Ok(())
+    }
+
+    fn create_file_header(&self) -> serde_json::Value {
+        serde_json::json!({
+            "_header": {
+                "version": "2.0",
+                "symbol": self.config.symbol,
+                "created_at": Utc::now().to_rfc3339(),
+                "connection_id": self.connection_id,
+                "streams": {
+                    "depth": true,
+                    "trades": self.config.enable_trades,
+                    "liquidations": self.config.enable_liquidations,
+                    "klines": self.config.enable_klines,
+                }
+            }
+        })
+    }
+
+    fn create_file_footer(&self) -> serde_json::Value {
+        serde_json::json!({
+            "closed_at": Utc::now().to_rfc3339(),
+            "bytes_written": self.bytes_written,
+            "stats": {
+                "total_messages": self.stats.total_messages.load(Ordering::Relaxed),
+                "depth_messages": self.stats.depth_messages.load(Ordering::Relaxed),
+                "trade_messages": self.stats.trade_messages.load(Ordering::Relaxed),
+                "sequence_gaps": self.stats.sequence_gaps.load(Ordering::Relaxed),
+                "crossed_books": self.stats.crossed_books.load(Ordering::Relaxed),
+                "dropped_messages": self.stats.dropped_messages.load(Ordering::Relaxed),
+            }
+        })
     }
 
     fn write_record(&mut self, record: &OutputRecord) -> Result<()> {
@@ -217,14 +520,19 @@ impl RotatingWriter {
         }
 
         let json = serde_json::to_string(record)?;
+        self.write_raw(&json)?;
+        self.stats.total_messages.fetch_add(1, Ordering::Relaxed);
+
+        Ok(())
+    }
+
+    fn write_raw(&mut self, json: &str) -> Result<()> {
         if let Some(encoder) = &mut self.current_file {
             let line = format!("{}\n", json);
             let bytes = line.as_bytes();
             encoder.write_all(bytes)?;
             self.bytes_written += bytes.len() as u64;
-            self.total_messages.fetch_add(1, Ordering::Relaxed);
         }
-
         Ok(())
     }
 
@@ -244,11 +552,14 @@ impl Drop for RotatingWriter {
     }
 }
 
-/// WebSocket collector
+// ============================================
+// Collector
+// ============================================
+
 struct Collector {
     config: Config,
     running: Arc<AtomicBool>,
-    total_messages: Arc<AtomicU64>,
+    stats: Arc<CollectorStats>,
 }
 
 impl Collector {
@@ -256,15 +567,32 @@ impl Collector {
         Self {
             config,
             running: Arc::new(AtomicBool::new(true)),
-            total_messages: Arc::new(AtomicU64::new(0)),
+            stats: CollectorStats::new(),
         }
     }
 
     fn build_ws_url(&self) -> String {
+        let mut streams = vec![format!("{}@depth@100ms", self.config.symbol.to_lowercase())];
+
+        if self.config.enable_trades {
+            streams.push(format!("{}@trade", self.config.symbol.to_lowercase()));
+        }
+
+        if self.config.enable_liquidations {
+            streams.push(format!("{}@forceOrder", self.config.symbol.to_lowercase()));
+        }
+
+        if self.config.enable_klines {
+            streams.push(format!(
+                "{}@kline_{}",
+                self.config.symbol.to_lowercase(),
+                self.config.kline_interval
+            ));
+        }
+
         format!(
-            "wss://fstream.binance.com/stream?streams={}@depth@100ms/{}@trade",
-            self.config.symbol.to_lowercase(),
-            self.config.symbol.to_lowercase()
+            "wss://fstream.binance.com/stream?streams={}",
+            streams.join("/")
         )
     }
 
@@ -280,14 +608,27 @@ impl Collector {
         Ok(ws_stream)
     }
 
-    fn parse_message(&self, msg: &str) -> Result<OutputRecord> {
+    fn parse_message(&self, msg: &str, order_book: &mut InternalOrderBook) -> Result<OutputRecord> {
         let local_ts = Utc::now().timestamp_micros();
         let stream_msg: StreamMessage = serde_json::from_str(msg)?;
 
         if stream_msg.stream.contains("depth") {
             let depth: BinanceDepthUpdate = serde_json::from_value(stream_msg.data)?;
+            let (has_issues, meta) = order_book.apply_update(&depth);
+
+            if has_issues {
+                if meta.as_ref().map(|m| m.sequence_gap.unwrap_or(false)).unwrap_or(false) {
+                    self.stats.sequence_gaps.fetch_add(1, Ordering::Relaxed);
+                }
+                if meta.as_ref().map(|m| m.book_crossed.unwrap_or(false)).unwrap_or(false) {
+                    self.stats.crossed_books.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+
+            self.stats.depth_messages.fetch_add(1, Ordering::Relaxed);
+
             Ok(OutputRecord {
-                exchange_ts: depth.transaction_time * 1000, // Convert to micros
+                exchange_ts: depth.transaction_time * 1000,
                 local_ts,
                 record_type: "depth".to_string(),
                 symbol: depth.symbol,
@@ -297,11 +638,16 @@ impl Collector {
                 bids: Some(depth.bids),
                 asks: Some(depth.asks),
                 trade: None,
+                liquidation: None,
+                kline: None,
+                meta,
             })
         } else if stream_msg.stream.contains("trade") {
             let trade: BinanceTrade = serde_json::from_value(stream_msg.data)?;
+            self.stats.trade_messages.fetch_add(1, Ordering::Relaxed);
+
             Ok(OutputRecord {
-                exchange_ts: trade.trade_time * 1000, // Convert to micros
+                exchange_ts: trade.trade_time * 1000,
                 local_ts,
                 record_type: "trade".to_string(),
                 symbol: trade.symbol,
@@ -316,6 +662,62 @@ impl Collector {
                     quantity: trade.quantity,
                     buyer_is_maker: trade.buyer_is_maker,
                 }),
+                liquidation: None,
+                kline: None,
+                meta: None,
+            })
+        } else if stream_msg.stream.contains("forceOrder") {
+            let liq: BinanceLiquidation = serde_json::from_value(stream_msg.data)?;
+            self.stats.liquidation_messages.fetch_add(1, Ordering::Relaxed);
+
+            Ok(OutputRecord {
+                exchange_ts: liq.order.trade_time * 1000,
+                local_ts,
+                record_type: "liquidation".to_string(),
+                symbol: liq.order.symbol,
+                first_update_id: None,
+                last_update_id: None,
+                prev_update_id: None,
+                bids: None,
+                asks: None,
+                trade: None,
+                liquidation: Some(LiquidationData {
+                    side: liq.order.side,
+                    price: liq.order.price,
+                    quantity: liq.order.quantity,
+                    avg_price: liq.order.avg_price,
+                    status: liq.order.status,
+                }),
+                kline: None,
+                meta: None,
+            })
+        } else if stream_msg.stream.contains("kline") {
+            let kline: BinanceKline = serde_json::from_value(stream_msg.data)?;
+            self.stats.kline_messages.fetch_add(1, Ordering::Relaxed);
+
+            Ok(OutputRecord {
+                exchange_ts: kline.event_time * 1000,
+                local_ts,
+                record_type: "kline".to_string(),
+                symbol: kline.symbol,
+                first_update_id: None,
+                last_update_id: None,
+                prev_update_id: None,
+                bids: None,
+                asks: None,
+                trade: None,
+                liquidation: None,
+                kline: Some(KlineOutput {
+                    interval: kline.kline.interval,
+                    open: kline.kline.open,
+                    high: kline.kline.high,
+                    low: kline.kline.low,
+                    close: kline.kline.close,
+                    volume: kline.kline.volume,
+                    trades: kline.kline.trades,
+                    is_final: kline.kline.is_final,
+                }),
+                meta: None,
             })
         } else {
             anyhow::bail!("Unknown stream type: {}", stream_msg.stream)
@@ -323,14 +725,14 @@ impl Collector {
     }
 
     async fn run(&self) -> Result<()> {
-        let (tx, mut rx) = mpsc::channel::<OutputRecord>(100_000);
+        let (tx, mut rx) = mpsc::channel::<OutputRecord>(self.config.channel_buffer_size);
         let running = self.running.clone();
         let config = self.config.clone();
-        let total_messages = self.total_messages.clone();
+        let stats = self.stats.clone();
 
         // Writer task
         let writer_handle = tokio::spawn(async move {
-            let mut writer = match RotatingWriter::new(config, total_messages) {
+            let mut writer = match RotatingWriter::new(config, stats.clone()) {
                 Ok(w) => w,
                 Err(e) => {
                     error!("Failed to create writer: {}", e);
@@ -355,11 +757,13 @@ impl Collector {
                         }
                     }
                     _ = stats_interval.tick() => {
-                        let current = writer.total_messages.load(Ordering::Relaxed);
+                        let current = stats.total_messages.load(Ordering::Relaxed);
                         let rate = (current - last_count) / 60;
+                        let gaps = stats.sequence_gaps.load(Ordering::Relaxed);
+                        let dropped = stats.dropped_messages.load(Ordering::Relaxed);
                         info!(
-                            "Stats: {} total messages, {} msg/sec, {} bytes in current file",
-                            current, rate, writer.bytes_written
+                            "Stats: {} total, {} msg/sec, {} gaps, {} dropped, {} bytes",
+                            current, rate, gaps, dropped, writer.bytes_written
                         );
                         last_count = current;
                     }
@@ -370,16 +774,19 @@ impl Collector {
             info!("Writer task shutting down");
         });
 
-        // Connection loop with reconnection logic
+        // Connection loop
         let mut reconnect_attempts = 0u32;
+        let mut connection_id = 0u64;
 
         while running.load(Ordering::Relaxed) {
             match self.connect().await {
                 Ok(ws_stream) => {
                     reconnect_attempts = 0;
-                    info!("WebSocket connected, starting message loop");
+                    connection_id += 1;
+                    info!("WebSocket connected (connection #{})", connection_id);
 
                     let (mut write, mut read) = ws_stream.split();
+                    let mut order_book = InternalOrderBook::new();
 
                     // Ping task
                     let running_ping = running.clone();
@@ -402,19 +809,30 @@ impl Collector {
 
                         match msg_result {
                             Ok(Message::Text(text)) => {
-                                match self.parse_message(&text) {
+                                match self.parse_message(&text, &mut order_book) {
                                     Ok(record) => {
-                                        if tx.send(record).await.is_err() {
-                                            error!("Channel closed, exiting");
-                                            break;
+                                        match tx.try_send(record) {
+                                            Ok(_) => {}
+                                            Err(mpsc::error::TrySendError::Full(record)) => {
+                                                self.stats.dropped_messages.fetch_add(1, Ordering::Relaxed);
+                                                warn!("Channel full, dropping message");
+                                                if record.record_type == "depth" {
+                                                    let _ = tx.send(record).await;
+                                                }
+                                            }
+                                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                                error!("Channel closed, exiting");
+                                                break;
+                                            }
                                         }
                                     }
                                     Err(e) => {
-                                        debug!("Failed to parse message: {} - {}", e, &text[..text.len().min(200)]);
+                                        self.stats.parse_errors.fetch_add(1, Ordering::Relaxed);
+                                        debug!("Parse error: {} - {}", e, &text[..text.len().min(200)]);
                                     }
                                 }
                             }
-                            Ok(Message::Ping(data)) => {
+                            Ok(Message::Ping(_)) => {
                                 debug!("Received ping");
                             }
                             Ok(Message::Pong(_)) => {
@@ -436,6 +854,7 @@ impl Collector {
                     }
 
                     ping_handle.abort();
+                    self.stats.reconnections.fetch_add(1, Ordering::Relaxed);
                     warn!("Disconnected from WebSocket");
                 }
                 Err(e) => {
@@ -478,7 +897,6 @@ impl Collector {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -486,7 +904,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    info!("MIDAS Collector starting...");
+    info!("MIDAS Collector v2.0 starting...");
 
     let config = Config::from_env()?;
     info!("Configuration: {:?}", config);
@@ -494,7 +912,6 @@ async fn main() -> Result<()> {
     let collector = Arc::new(Collector::new(config));
     let collector_clone = collector.clone();
 
-    // Handle shutdown signals
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
         info!("Received shutdown signal");
@@ -502,6 +919,16 @@ async fn main() -> Result<()> {
     });
 
     collector.run().await?;
+
+    let stats = &collector.stats;
+    info!(
+        "Final stats: {} total, {} depth, {} trades, {} gaps, {} dropped",
+        stats.total_messages.load(Ordering::Relaxed),
+        stats.depth_messages.load(Ordering::Relaxed),
+        stats.trade_messages.load(Ordering::Relaxed),
+        stats.sequence_gaps.load(Ordering::Relaxed),
+        stats.dropped_messages.load(Ordering::Relaxed),
+    );
 
     info!("MIDAS Collector stopped");
     Ok(())

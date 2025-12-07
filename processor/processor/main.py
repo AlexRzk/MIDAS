@@ -2,6 +2,7 @@
 Main processor service - orchestrates reading, reconstruction, and cleaning.
 """
 import time
+import os
 import signal
 import sys
 import logging
@@ -35,6 +36,16 @@ structlog.configure(
 )
 
 logger = structlog.get_logger()
+# Optional Prometheus metrics
+_prometheus_enabled = os.getenv("ENABLE_PROMETHEUS", "false").lower() in ("1", "true")
+if _prometheus_enabled:
+    try:
+        from prometheus_client import start_http_server, Counter, Gauge
+        start_http_server(8000)
+        FILES_PROCESSED = Counter("midas_processor_files_processed_total", "Files processed by processor")
+    except Exception:
+        logger.warning("prometheus_client_not_available")
+        _prometheus_enabled = False
 
 
 class NewFileHandler(FileSystemEventHandler):
@@ -63,10 +74,27 @@ class ProcessorService:
     def __init__(self, config: ProcessorConfig):
         self.config = config
         self.reader = RawDataReader(config.raw_data_path)
-        self.reconstructor = OrderBookReconstructor(
-            depth=config.order_book_depth,
-            snapshot_interval_ms=config.snapshot_interval_ms,
-        )
+        try:
+            from .orderbook_v2 import MultiSymbolReconstructor as OrderBookReconstructor
+            logger.info("using_orderbook_v2")
+        except Exception:
+            from .orderbook import OrderBookReconstructor
+            logger.info("using_orderbook_v1")
+        
+        # Try to instantiate v2 reconstructor with checkpoint support; fallback gracefully
+        try:
+            self.reconstructor = OrderBookReconstructor(
+                symbols=[config.symbol],
+                depth=config.order_book_depth,
+                snapshot_interval_ms=config.snapshot_interval_ms,
+                checkpoint_dir=config.clean_data_path / "checkpoints",
+            )
+        except TypeError:
+            # Fallback to v1 API
+            self.reconstructor = OrderBookReconstructor(
+                depth=config.order_book_depth,
+                snapshot_interval_ms=config.snapshot_interval_ms,
+            )
         self.cleaner = DataCleaner()
         
         self._running = True
@@ -137,6 +165,18 @@ class ProcessorService:
         )
         
         self._save_processed_file(filepath_str)
+        # Save order book checkpoints after processing the file
+        try:
+            if hasattr(self.reconstructor, "save_checkpoints"):
+                self.reconstructor.save_checkpoints()
+                logger.info("checkpoints_saved", path=str(self.config.clean_data_path / "checkpoints"))
+        except Exception as e:
+            logger.warning("checkpoint_save_failed", error=str(e))
+        if _prometheus_enabled:
+            try:
+                FILES_PROCESSED.inc()
+            except Exception:
+                pass
     
     def process_all_pending(self):
         """Process all unprocessed files."""

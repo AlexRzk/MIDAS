@@ -38,3 +38,5 @@ class ProcessorConfig:
         """Ensure directories exist."""
         self.raw_data_path.mkdir(parents=True, exist_ok=True)
         self.clean_data_path.mkdir(parents=True, exist_ok=True)
+        # Create checkpoint directory inside clean data path
+        (self.clean_data_path / "checkpoints").mkdir(parents=True, exist_ok=True)

@@ -2,6 +2,7 @@
 Main feature generator service.
 """
 import time
+import os
 import signal
 import logging
 from pathlib import Path
@@ -12,7 +13,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileCreatedEvent
 
 from .config import FeatureConfig
-from .compute import FeatureComputer, time_bucket_aggregate
+from .compute import time_bucket_aggregate
 from .writer import FeatureWriter
 
 # Configure structured logging
@@ -33,6 +34,16 @@ structlog.configure(
 )
 
 logger = structlog.get_logger()
+# Optional Prometheus metrics
+_prometheus_enabled = os.getenv("ENABLE_PROMETHEUS", "false").lower() in ("1", "true")
+if _prometheus_enabled:
+    try:
+        from prometheus_client import start_http_server, Counter
+        start_http_server(8001)
+        FILES_PROCESSED = Counter("midas_features_files_processed_total", "Files processed by features")
+    except Exception:
+        logger.warning("prometheus_client_not_available")
+        _prometheus_enabled = False
 
 
 class NewFileHandler(FileSystemEventHandler):
@@ -59,10 +70,26 @@ class FeatureService:
     
     def __init__(self, config: FeatureConfig):
         self.config = config
-        self.computer = FeatureComputer(
-            depth=config.order_book_depth,
-            ofi_window=config.ofi_window,
-        )
+        # Prefer v2 compute if available (backwards compatible)
+        try:
+            from .compute_v2 import FeatureComputer as FeatureComputerV2, time_bucket_aggregate as tb_v2
+            self.computer = FeatureComputerV2(
+                depth=config.order_book_depth,
+                ofi_window=config.ofi_window,
+            )
+            # prefer v2 aggregation function
+            self.time_bucket_aggregate = tb_v2
+            logger.info("using_feature_computer_v2")
+        except Exception:
+            from .compute import FeatureComputer as FeatureComputerV1
+            self.computer = FeatureComputerV1(
+                depth=config.order_book_depth,
+                ofi_window=config.ofi_window,
+            )
+            logger.info("using_feature_computer_v1")
+        # Default aggregation function
+        if not hasattr(self, "time_bucket_aggregate"):
+            self.time_bucket_aggregate = time_bucket_aggregate
         self.writer = FeatureWriter(
             output_path=config.features_data_path,
             row_group_size=config.parquet_row_group_size,
@@ -116,7 +143,7 @@ class FeatureService:
             
             # Time bucket aggregation (optional)
             if self.config.time_bucket_ms > 0:
-                df = time_bucket_aggregate(df, self.config.time_bucket_ms)
+                df = self.time_bucket_aggregate(df, self.config.time_bucket_ms)
             
             # Select output columns (drop intermediate columns)
             output_cols = self._get_output_columns(df)
@@ -125,6 +152,11 @@ class FeatureService:
             # Write to Parquet
             output_name = f"features_{filepath.stem.replace('clean_', '')}.parquet"
             self.writer.write(df, filename=output_name)
+            if _prometheus_enabled:
+                try:
+                    FILES_PROCESSED.inc()
+                except Exception:
+                    pass
             
             elapsed = time.time() - start_time
             logger.info(

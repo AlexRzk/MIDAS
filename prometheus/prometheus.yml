@@ -1,0 +1,29 @@
+# Prometheus configuration for MIDAS
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+rule_files: []
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Scrape metrics from containers (if metrics endpoints added)
+  # - job_name: 'midas-collector'
+  #   static_configs:
+  #     - targets: ['collector:8080']
+  
+  # - job_name: 'midas-processor'
+  #   static_configs:
+  #     - targets: ['processor:8080']
+  
+  # - job_name: 'midas-features'
+  #   static_configs:
+  #     - targets: ['features:8080']

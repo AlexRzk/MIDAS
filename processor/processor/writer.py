@@ -9,6 +9,10 @@ import polars as pl
 import structlog
 
 from .orderbook import OrderBookSnapshot
+from .validation import DataValidator, create_parquet_metadata
+import pyarrow as pa
+import pyarrow.parquet as pq
+import json
 
 logger = structlog.get_logger()
 
@@ -27,6 +31,7 @@ class CleanDataWriter:
         self._buffer: list[dict] = []
         self._buffer_size = 50000
         self._files_written = 0
+        self._validator = DataValidator()
     
     def _snapshot_to_dict(self, snapshot: OrderBookSnapshot) -> dict:
         """Convert a snapshot to a flat dictionary."""
@@ -87,12 +92,38 @@ class CleanDataWriter:
         filename = f"clean_{ts}_{self._files_written:04d}.parquet"
         filepath = self.output_path / filename
         
-        # Write to Parquet
-        df.write_parquet(
-            filepath,
-            compression="zstd",
-            compression_level=3,
+        # Validate dataframe quality before writing
+        try:
+            report = self._validator.validate_dataframe(df, str(filepath))
+        except Exception as e:
+            logger.error("validation_failed", error=str(e))
+            report = None
+
+        # Attach metadata
+        parquet_meta = create_parquet_metadata(
+            symbol=None,
+            snapshot_interval_ms=0,
+            order_book_depth=self.depth,
+            start_ts=int(df["ts"].min()) if "ts" in df.columns and len(df) > 0 else 0,
+            end_ts=int(df["ts"].max()) if "ts" in df.columns and len(df) > 0 else 0,
+            row_count=len(df),
+            quality_report=report,
         )
+
+        # Convert to Arrow table and set metadata
+        try:
+            table = pa.Table.from_batches(list(df.to_arrow().to_batches()))
+            # Convert metadata dict to bytes
+            raw_md = {k: json.dumps(v).encode("utf8") for k, v in parquet_meta.items() if v is not None}
+            table = table.replace_schema_metadata(raw_md)
+            pq.write_table(table, filepath, compression="zstd", compression_level=3, row_group_size=65536)
+        except Exception:
+            # Fallback: use Polars writer
+            df.write_parquet(
+                filepath,
+                compression="zstd",
+                compression_level=3,
+            )
         
         logger.info(
             "wrote_clean_data",
