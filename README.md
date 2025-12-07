@@ -42,6 +42,18 @@ A production-grade crypto data pipeline for collecting, processing, and feature 
 ### Prerequisites
 - Docker and Docker Compose
 - ~10GB disk space (for data storage)
+### Preflight (optional but recommended)
+
+Before starting, run the preflight script to check disk layout and Docker availability:
+
+```bash
+chmod +x scripts/preflight.sh && ./scripts/preflight.sh
+```
+If any directories are missing, the script will print guidance and you can run the setup script:
+
+```bash
+chmod +x scripts/setup.sh && ./scripts/setup.sh
+```
 
 ### Installation
 
