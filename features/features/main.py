@@ -1,0 +1,260 @@
+"""
+Main feature generator service.
+"""
+import time
+import signal
+import logging
+from pathlib import Path
+from datetime import datetime
+import polars as pl
+import structlog
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler, FileCreatedEvent
+
+from .config import FeatureConfig
+from .compute import FeatureComputer, time_bucket_aggregate
+from .writer import FeatureWriter
+
+# Configure structured logging
+structlog.configure(
+    processors=[
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.PositionalArgumentsFormatter(),
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.processors.UnicodeDecoder(),
+        structlog.dev.ConsoleRenderer(),
+    ],
+    wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+    context_class=dict,
+    logger_factory=structlog.PrintLoggerFactory(),
+    cache_logger_on_first_use=True,
+)
+
+logger = structlog.get_logger()
+
+
+class NewFileHandler(FileSystemEventHandler):
+    """Handler for new clean data files."""
+    
+    def __init__(self):
+        self._pending_files = set()
+    
+    def on_created(self, event):
+        if isinstance(event, FileCreatedEvent):
+            if event.src_path.endswith(".parquet") and "clean_" in event.src_path:
+                self._pending_files.add(event.src_path)
+                logger.info("new_clean_file_detected", path=event.src_path)
+
+
+class FeatureService:
+    """
+    Main feature generator service that:
+    1. Reads cleaned order book data
+    2. Computes features (OFI, imbalance, spread, etc.)
+    3. Aggregates to time buckets
+    4. Writes ML-ready Parquet files
+    """
+    
+    def __init__(self, config: FeatureConfig):
+        self.config = config
+        self.computer = FeatureComputer(
+            depth=config.order_book_depth,
+            ofi_window=config.ofi_window,
+        )
+        self.writer = FeatureWriter(
+            output_path=config.features_data_path,
+            row_group_size=config.parquet_row_group_size,
+        )
+        
+        self._running = True
+        self._processed_files: set[str] = set()
+        self._processed_files_path = config.features_data_path / ".processed_files"
+        
+        self._load_processed_files()
+    
+    def _load_processed_files(self):
+        """Load list of already processed files."""
+        if self._processed_files_path.exists():
+            with open(self._processed_files_path) as f:
+                self._processed_files = set(line.strip() for line in f)
+            logger.info("loaded_processed_files", count=len(self._processed_files))
+    
+    def _save_processed_file(self, filepath: str):
+        """Mark a file as processed."""
+        self._processed_files.add(filepath)
+        with open(self._processed_files_path, "a") as f:
+            f.write(f"{filepath}\n")
+    
+    def list_clean_files(self) -> list[Path]:
+        """List all clean data files."""
+        return sorted(self.config.clean_data_path.glob("clean_*.parquet"))
+    
+    def process_file(self, filepath: Path):
+        """Process a single clean data file."""
+        filepath_str = str(filepath)
+        
+        if filepath_str in self._processed_files:
+            logger.debug("skipping_already_processed", path=filepath_str)
+            return
+        
+        logger.info("processing_clean_file", path=filepath_str)
+        start_time = time.time()
+        
+        try:
+            # Read clean data
+            df = pl.read_parquet(filepath)
+            
+            if len(df) == 0:
+                logger.warning("empty_file", path=filepath_str)
+                self._save_processed_file(filepath_str)
+                return
+            
+            # Compute features
+            df = self.computer.compute_all_features(df)
+            
+            # Time bucket aggregation (optional)
+            if self.config.time_bucket_ms > 0:
+                df = time_bucket_aggregate(df, self.config.time_bucket_ms)
+            
+            # Select output columns (drop intermediate columns)
+            output_cols = self._get_output_columns(df)
+            df = df.select([c for c in output_cols if c in df.columns])
+            
+            # Write to Parquet
+            output_name = f"features_{filepath.stem.replace('clean_', '')}.parquet"
+            self.writer.write(df, filename=output_name)
+            
+            elapsed = time.time() - start_time
+            logger.info(
+                "file_processed",
+                path=filepath_str,
+                elapsed_sec=round(elapsed, 2),
+                input_rows=len(df),
+                output_columns=len(df.columns),
+            )
+            
+            self._save_processed_file(filepath_str)
+            
+        except Exception as e:
+            logger.error("processing_error", path=filepath_str, error=str(e))
+            raise
+    
+    def _get_output_columns(self, df: pl.DataFrame) -> list[str]:
+        """Get the list of columns to include in output."""
+        # Core columns
+        cols = ["ts"]
+        
+        # Price/size levels
+        for i in range(1, self.config.order_book_depth + 1):
+            cols.extend([
+                f"bid_px_{i:02d}",
+                f"bid_sz_{i:02d}",
+                f"ask_px_{i:02d}",
+                f"ask_sz_{i:02d}",
+            ])
+        
+        # Features
+        cols.extend([
+            "midprice",
+            "spread",
+            "spread_bps",
+            "imbalance",
+            "imbalance_1",
+            "imbalance_5",
+            "imbalance_10",
+            "ofi",
+            f"ofi_{self.config.ofi_window}",
+            "ofi_cumulative",
+            "microprice",
+            "taker_buy_volume",
+            "taker_sell_volume",
+            "signed_volume",
+            "volume_imbalance",
+            "last_trade_px",
+            "last_trade_qty",
+            "liquidity_bid_1",
+            "liquidity_ask_1",
+            "liquidity_1",
+            "liquidity_bid_5",
+            "liquidity_ask_5",
+            "liquidity_5",
+            "liquidity_bid_10",
+            "liquidity_ask_10",
+            "liquidity_10",
+            "returns",
+            "volatility_20",
+            "volatility_100",
+        ])
+        
+        return cols
+    
+    def process_all_pending(self):
+        """Process all unprocessed files."""
+        files = self.list_clean_files()
+        
+        for filepath in files:
+            if not self._running:
+                break
+            
+            # Skip files that might still be written to
+            try:
+                mtime = filepath.stat().st_mtime
+                if time.time() - mtime < 30:
+                    logger.debug("skipping_recent_file", path=str(filepath))
+                    continue
+            except OSError:
+                continue
+            
+            self.process_file(filepath)
+    
+    def run(self):
+        """Main run loop."""
+        logger.info(
+            "feature_service_starting",
+            clean_path=str(self.config.clean_data_path),
+            features_path=str(self.config.features_data_path),
+        )
+        
+        # Set up signal handlers
+        def signal_handler(sig, frame):
+            logger.info("shutdown_signal_received")
+            self._running = False
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        
+        # Set up file watcher
+        event_handler = NewFileHandler()
+        observer = Observer()
+        observer.schedule(event_handler, str(self.config.clean_data_path), recursive=False)
+        observer.start()
+        
+        try:
+            while self._running:
+                self.process_all_pending()
+                time.sleep(30)
+                
+        except KeyboardInterrupt:
+            logger.info("keyboard_interrupt")
+        finally:
+            observer.stop()
+            observer.join()
+            
+            logger.info(
+                "feature_service_stopped",
+                files_processed=len(self._processed_files),
+                writer_stats=self.writer.get_stats(),
+            )
+
+
+def main():
+    """Entry point."""
+    config = FeatureConfig.from_env()
+    service = FeatureService(config)
+    service.run()
+
+
+if __name__ == "__main__":
+    main()
