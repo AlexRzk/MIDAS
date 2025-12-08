@@ -461,10 +461,11 @@ class MultiSymbolReconstructor:
             symbols = ["BTCUSDT"]
         
         self.books: dict[str, OrderBookV2] = {}
+        # Last snapshot timestamp per symbol (microseconds)
+        # Initialize before creating any books so _create_book can safely reference it
+        self._last_snapshot_ts: dict[str, int] = {}
         for sym in symbols:
             self._create_book(sym)
-        
-        self._last_snapshot_ts: dict[str, int] = {}
         self._total_events = 0
     
     def _create_book(self, symbol: str) -> OrderBookV2:
