@@ -289,6 +289,7 @@ def time_bucket_aggregate(
     df: pl.DataFrame,
     bucket_ms: int,
     timestamp_col: str = "ts",
+    ts_unit: str = None,
 ) -> pl.DataFrame:
     """
     Aggregate data into fixed time buckets.
@@ -297,13 +298,50 @@ def time_bucket_aggregate(
     - Last value for prices/sizes
     - Sum for volumes
     - Mean for imbalance/OFI
+    - OHLC for midprice (klines)
+    
+    Args:
+        df: Input DataFrame
+        bucket_ms: Bucket size in MILLISECONDS (e.g., 60000 = 60 seconds = 1 minute)
+        timestamp_col: Name of timestamp column
+        ts_unit: Unit of timestamp column ('us', 'ms', 's'). Auto-detected if None.
+        
+    Note:
+        The bucket_ms parameter is ALWAYS in milliseconds. The function automatically
+        converts to the appropriate units based on the timestamp column's unit.
+        
+        Example: bucket_ms=60000 means 60,000 milliseconds = 60 seconds = 1 minute
     """
-    # Convert bucket to microseconds (assuming ts is in microseconds)
-    bucket_us = bucket_ms * 1000
+    # Import ts_utils for unit detection
+    from .ts_utils import detect_timestamp_unit, TimestampUnit, TO_MICROSECONDS
+    
+    # Detect timestamp unit if not provided
+    if ts_unit is None:
+        detected_unit = detect_timestamp_unit(df, timestamp_col)
+        ts_unit = detected_unit.value if detected_unit != TimestampUnit.UNKNOWN else "us"
+    
+    # Convert bucket_ms to timestamp column's units
+    # bucket_ms is always in milliseconds
+    unit_map = {"us": TimestampUnit.MICROSECONDS, "ms": TimestampUnit.MILLISECONDS, "s": TimestampUnit.SECONDS}
+    ts_unit_enum = unit_map.get(ts_unit, TimestampUnit.MICROSECONDS)
+    
+    # Convert: bucket_ms (in ms) -> bucket_in_ts_units
+    ms_to_us = TO_MICROSECONDS[TimestampUnit.MILLISECONDS]  # 1000
+    ts_to_us = TO_MICROSECONDS[ts_unit_enum]
+    
+    # bucket_ms * 1000 = bucket_us, then bucket_us / ts_to_us = bucket_in_ts_units
+    bucket_in_ts_units = int(bucket_ms * ms_to_us / ts_to_us)
+    
+    logger.info(
+        "time_bucket_aggregate",
+        bucket_ms=bucket_ms,
+        ts_unit=ts_unit,
+        bucket_in_ts_units=bucket_in_ts_units,
+    )
     
     # Create bucket column
     df = df.with_columns([
-        (pl.col(timestamp_col) // bucket_us * bucket_us).alias("bucket_ts"),
+        (pl.col(timestamp_col) // bucket_in_ts_units * bucket_in_ts_units).alias("bucket_ts"),
     ])
     
     # Define aggregation strategy
@@ -316,7 +354,7 @@ def time_bucket_aggregate(
     sum_cols = [c for c in df.columns if "volume" in c.lower() or "vol" in c.lower()]
     
     # Mean columns
-    mean_cols = ["ofi", "imbalance", "spread", "midprice", "microprice"]
+    mean_cols = ["ofi", "imbalance", "spread", "microprice"]
     mean_cols = [c for c in mean_cols if c in df.columns]
     
     # Build aggregation expressions
@@ -334,10 +372,42 @@ def time_bucket_aggregate(
         if col in df.columns:
             agg_exprs.append(pl.col(col).mean().alias(col))
     
+    # Add OHLCV kline aggregations for midprice
+    if "midprice" in df.columns:
+        agg_exprs.extend([
+            pl.col("midprice").first().alias("open"),
+            pl.col("midprice").max().alias("high"),
+            pl.col("midprice").min().alias("low"),
+            pl.col("midprice").last().alias("close"),
+        ])
+    
+    # Add volume sum for klines
+    vol_cols_for_total = [c for c in ["taker_buy_volume", "taker_sell_volume"] if c in df.columns]
+    if vol_cols_for_total:
+        total_vol = sum(pl.col(c) for c in vol_cols_for_total)
+        agg_exprs.append(total_vol.sum().alias("volume"))
+        
+        # VWAP calculation
+        if "midprice" in df.columns:
+            agg_exprs.append(
+                ((pl.col("midprice") * total_vol).sum() / total_vol.sum()).alias("vwap")
+            )
+    
+    # Number of trades/samples in bucket
+    agg_exprs.append(pl.count().alias("number_of_trades"))
+    
     # Aggregate
     result = df.group_by("bucket_ts").agg(agg_exprs).sort("bucket_ts")
     
     # Rename bucket_ts to ts
     result = result.rename({"bucket_ts": "ts"})
+    
+    # Log aggregation results
+    logger.info(
+        "time_bucket_aggregation_complete",
+        input_rows=len(df),
+        output_rows=len(result),
+        bucket_ms=bucket_ms,
+    )
     
     return result

@@ -1,0 +1,133 @@
+# MIDAS Training Services
+#
+# Usage:
+#   docker compose -f docker-compose.training.yml up training
+#   docker compose -f docker-compose.training.yml run training python training/train.py --epochs 100
+#   docker compose -f docker-compose.training.yml run backtest python training/backtest.py --model models/best_model.pt
+#
+
+services:
+  # Main TFT Training Service
+  training:
+    build:
+      context: .
+      dockerfile: Dockerfile.training
+    image: midas-training:latest
+    container_name: midas-training
+    
+    # GPU Configuration - Use 'deploy' for modern Docker Compose
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    # Alternative for older Docker versions - uncomment if deploy doesn't work
+    # runtime: nvidia
+    # environment:
+    #   - NVIDIA_VISIBLE_DEVICES=all
+    
+    volumes:
+      # Mount data directory (read-write for caching)
+      - ./data:/app/data:rw
+      # Mount models directory for checkpoints
+      - ./models:/app/models:rw
+      # Mount logs for TensorBoard
+      - ./logs:/app/logs:rw
+      # Mount reports for backtest output
+      - ./reports:/app/reports:rw
+      # Optional: Mount training code for development
+      # - ./training:/app/training:ro
+    
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CUDA_VISIBLE_DEVICES=0
+      - TORCH_HOME=/app/.cache/torch
+    
+    working_dir: /app
+    
+    # Default training command
+    command: >
+      python training/train.py
+      --data-dir /app/data/features
+      --model-dir /app/models
+      --log-dir /app/logs/tensorboard
+      --epochs 100
+      --batch-size 64
+      --gpus 1
+    
+    # Keep container running for interactive use
+    # stdin_open: true
+    # tty: true
+
+  # Backtesting Service
+  backtest:
+    build:
+      context: .
+      dockerfile: Dockerfile.training
+    image: midas-training:latest
+    container_name: midas-backtest
+    
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    
+    volumes:
+      - ./data:/app/data:ro
+      - ./models:/app/models:ro
+      - ./reports:/app/reports:rw
+    
+    environment:
+      - PYTHONUNBUFFERED=1
+    
+    working_dir: /app
+    
+    command: >
+      python training/backtest.py
+      --model /app/models/best_model.pt
+      --data-dir /app/data/features
+      --output /app/reports/backtest_results.csv
+
+  # TensorBoard Service
+  tensorboard:
+    image: tensorflow/tensorflow:latest
+    container_name: midas-tensorboard
+    
+    ports:
+      - "6006:6006"
+    
+    volumes:
+      - ./logs/tensorboard:/logs:ro
+    
+    command: tensorboard --logdir=/logs --host=0.0.0.0 --port=6006
+    
+    restart: unless-stopped
+
+  # Validation Service
+  validate:
+    build:
+      context: .
+      dockerfile: Dockerfile.training
+    image: midas-training:latest
+    container_name: midas-validate
+    
+    volumes:
+      - ./data:/app/data:ro
+      - ./reports:/app/reports:rw
+    
+    working_dir: /app
+    
+    command: >
+      python scripts/validate_features.py
+      --dir /app/data/features
+      --output /app/reports/validation_report.json
+
+# Named volumes (optional - uncomment for persistent cache)
+# volumes:
+#   torch-cache:

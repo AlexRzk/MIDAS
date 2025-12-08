@@ -231,6 +231,14 @@ class FeatureService:
             "queue_imb_4",
             "queue_imb_5",
             "vol_of_vol",
+            # OHLCV kline columns (computed from aggregation)
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "vwap",
+            "number_of_trades",
         ])
         
         return cols

@@ -1,0 +1,157 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MIDAS Feature Validation Report",
+  "description": "Template for feature validation output",
+  "type": "object",
+  "properties": {
+    "validation_timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of validation run"
+    },
+    "data_directory": {
+      "type": "string",
+      "description": "Path to validated data directory"
+    },
+    "total_files": {
+      "type": "integer",
+      "description": "Total number of Parquet files validated"
+    },
+    "valid_files": {
+      "type": "integer",
+      "description": "Number of files passing all validation checks"
+    },
+    "invalid_files": {
+      "type": "integer",
+      "description": "Number of files with validation errors"
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "filename": {
+            "type": "string",
+            "description": "Name of the Parquet file"
+          },
+          "valid": {
+            "type": "boolean",
+            "description": "Overall validation status"
+          },
+          "row_count": {
+            "type": "integer",
+            "description": "Number of rows in file"
+          },
+          "column_count": {
+            "type": "integer",
+            "description": "Number of columns in file"
+          },
+          "time_range": {
+            "type": "object",
+            "properties": {
+              "start": {
+                "type": "integer",
+                "description": "First timestamp (microseconds)"
+              },
+              "end": {
+                "type": "integer",
+                "description": "Last timestamp (microseconds)"
+              },
+              "duration_seconds": {
+                "type": "number",
+                "description": "Duration in seconds"
+              }
+            }
+          },
+          "expected_buckets": {
+            "type": "integer",
+            "description": "Expected number of 1-minute buckets based on time range"
+          },
+          "bucket_ratio": {
+            "type": "number",
+            "description": "Ratio of actual rows to expected buckets (should be ~1.0)"
+          },
+          "columns_present": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "List of columns found in file"
+          },
+          "columns_missing": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Required columns not found"
+          },
+          "issues": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "severity": {
+                  "type": "string",
+                  "enum": ["error", "warning", "info"]
+                },
+                "code": {
+                  "type": "string",
+                  "description": "Issue code (e.g., MISSING_COLUMN, BUCKET_MISMATCH)"
+                },
+                "message": {
+                  "type": "string",
+                  "description": "Human-readable description"
+                }
+              }
+            }
+          },
+          "statistics": {
+            "type": "object",
+            "description": "Summary statistics for key columns",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "mean": {"type": "number"},
+                "std": {"type": "number"},
+                "min": {"type": "number"},
+                "max": {"type": "number"},
+                "null_count": {"type": "integer"},
+                "null_pct": {"type": "number"}
+              }
+            }
+          }
+        },
+        "required": ["filename", "valid"]
+      }
+    },
+    "summary": {
+      "type": "object",
+      "properties": {
+        "total_rows": {
+          "type": "integer",
+          "description": "Sum of rows across all files"
+        },
+        "total_issues": {
+          "type": "integer",
+          "description": "Total count of validation issues"
+        },
+        "errors": {
+          "type": "integer",
+          "description": "Count of error-level issues"
+        },
+        "warnings": {
+          "type": "integer",
+          "description": "Count of warning-level issues"
+        },
+        "common_issues": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "code": {"type": "string"},
+              "count": {"type": "integer"}
+            }
+          },
+          "description": "Most common issues across files"
+        }
+      }
+    }
+  },
+  "required": ["validation_timestamp", "total_files", "valid_files", "invalid_files", "files"]
+}
