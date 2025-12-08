@@ -45,8 +45,7 @@ ENV FILE_ROTATION_GB=1
 ENV RECONNECT_DELAY_SECS=5
 ENV MAX_RECONNECT_ATTEMPTS=0
 
-# Run as non-root user
-RUN useradd -r -s /bin/false midas && chown -R midas:midas /app /data
-USER midas
+# Create non-root user (but we'll use bind mounts with host permissions)
+RUN mkdir -p /data/raw && chmod -R 777 /data
 
 CMD ["./midas-collector"]

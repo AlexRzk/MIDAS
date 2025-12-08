@@ -1,6 +1,9 @@
 #!/bin/bash
 # Rebuild and restart collector service
 
+echo "Fixing data directory permissions..."
+chmod -R 777 ./data/raw ./data/clean ./data/features 2>/dev/null || true
+
 echo "Stopping collector..."
 docker compose down collector
 
