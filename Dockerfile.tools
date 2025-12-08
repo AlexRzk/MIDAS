@@ -7,8 +7,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python requirements (if present at build time)
-COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt || true
-
+# Do not assume a requirements.txt exists in the repo root during build;
+# dependencies may live in features/ or in a root-level file. We install them at container runtime.
 ENTRYPOINT ["/bin/bash", "-c"]

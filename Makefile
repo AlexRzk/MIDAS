@@ -1,4 +1,4 @@
-.PHONY: setup build up down logs clean test inspect lint validate rebuild preflight
+.PHONY: setup build up down logs clean test rebuild preflight validate-features
 
 # Default target
 all: preflight setup build up
@@ -6,23 +6,18 @@ all: preflight setup build up
 # Preflight check - ensure directories exist
 preflight:
 	@echo "Running preflight checks..."
-	@mkdir -p data/raw data/clean data/features
-	@mkdir -p logs/collector logs/processor logs/features
-	@mkdir -p prometheus grafana/dashboards
+	@mkdir -p data/raw data/clean data/features models reports logs/collector logs/processor logs/features
 	@echo "Preflight complete!"
 
 # Create directories and environment
 setup: preflight
-	@echo "Setting up MIDAS..."
 	@test -f .env || cp .env.example .env
 	@echo "Setup complete!"
 
 # Build all Docker images
 build:
-	@echo "Building Docker images..."
 	docker compose build
 
-# Build specific service
 build-collector:
 	docker compose build collector
 
@@ -32,34 +27,28 @@ build-processor:
 build-features:
 	docker compose build features
 
-# Rebuild only changed services
+build-tools:
+	docker compose build tools
+
+build-training:
+	docker compose -f docker-compose.training.yml build training
+
+# Rebuild without cache
 rebuild:
-	@echo "Rebuilding changed services..."
 	docker compose build --no-cache
 
 # Start all services
 up: preflight
-	@echo "Starting MIDAS pipeline..."
 	docker compose up -d
 	@echo "Pipeline started! Use 'make logs' to view output."
 
-# Start with monitoring stack
-up-monitoring: preflight
-	@echo "Starting MIDAS pipeline with monitoring..."
-	docker compose --profile monitoring up -d
-	@echo "Pipeline and monitoring started!"
-	@echo "Prometheus: http://localhost:9090"
-	@echo "Grafana:    http://localhost:3000"
-
 # Stop all services
 down:
-	@echo "Stopping MIDAS pipeline..."
 	docker compose down
 
-# Stop including monitoring
 down-all:
-	@echo "Stopping all services including monitoring..."
-	docker compose --profile monitoring down
+	docker compose down
+	docker compose -f docker-compose.training.yml down
 
 # View logs
 logs:
@@ -96,59 +85,30 @@ clean-data:
 
 # Clean everything including Docker
 clean: clean-data
-	@echo "Cleaning Docker resources..."
-	docker compose --profile monitoring down -v --rmi local
+	docker compose down -v --rmi local
+	docker compose -f docker-compose.training.yml down -v --rmi local
 	@echo "Clean complete!"
-
-# Inspect collected data
-inspect:
-	@python scripts/inspect_data.py
 
 # Run tests
 test:
-	@echo "Running processor tests..."
-	cd processor && python -m pytest tests/ -v
-	@echo "Running features tests..."
-	cd features && python -m pytest tests/ -v
+	docker compose run --rm tools bash -lc "pip install -r features/requirements.txt && python -m pytest tests/ -v"
 
-test-processor:
-	cd processor && python -m pytest tests/ -v
+# Validate feature Parquet files
+validate-features:
+	@echo "Validating feature Parquet files..."
+	@docker compose build tools >/dev/null 2>&1 || true
+	@docker compose run --rm tools bash -lc "pip install -r features/requirements.txt && python scripts/validate_features.py --dir /app/data/features --output /app/reports/validation_report.json"
 
-test-features:
-	cd features && python -m pytest tests/ -v
+# Training
+train:
+	docker compose -f docker-compose.training.yml up training
 
-# Lint code
-lint:
-	@echo "Linting Python code..."
-	cd processor && python -m ruff check .
-	cd features && python -m ruff check .
-	@echo "Linting Rust code..."
-	cd collector && cargo clippy -- -D warnings
+train-interactive:
+	docker compose -f docker-compose.training.yml run --rm training bash
 
-lint-fix:
-	@echo "Fixing Python lint issues..."
-	cd processor && python -m ruff check . --fix
-	cd features && python -m ruff check . --fix
-	@echo "Fixing Rust lint issues..."
-	cd collector && cargo clippy --fix --allow-dirty
-
-# Format code
-fmt:
-	@echo "Formatting Python code..."
-	cd processor && python -m ruff format .
-	cd features && python -m ruff format .
-	@echo "Formatting Rust code..."
-	cd collector && cargo fmt
-
-# Validate data quality
-validate:
-	@echo "Validating data quality..."
-	@python scripts/validate_data.py
-
-# Schema validation
-validate-schema:
-	@echo "Validating Parquet schemas..."
-	@python scripts/validate_schema.py
+# Backtesting
+backtest:
+	docker compose -f docker-compose.training.yml run --rm backtest
 
 # Status of services
 status:
@@ -169,14 +129,8 @@ shell-processor:
 shell-features:
 	docker compose exec features /bin/bash
 
-# Development helpers
-dev-processor:
-	@echo "Starting processor in dev mode..."
-	cd processor && python -m processor.main
-
-dev-features:
-	@echo "Starting features in dev mode..."
-	cd features && python -m features.main
+shell-tools:
+	docker compose run --rm tools bash
 
 # Data stats
 stats:
@@ -193,31 +147,26 @@ stats:
 help:
 	@echo "MIDAS - Market Intelligence Data Acquisition System"
 	@echo ""
-	@echo "Core targets:"
+	@echo "Setup:"
 	@echo "  setup          - Create directories and .env file"
 	@echo "  build          - Build Docker images"
-	@echo "  up             - Start all services"
-	@echo "  up-monitoring  - Start with Prometheus & Grafana"
+	@echo "  up             - Start data collection pipeline"
 	@echo "  down           - Stop all services"
-	@echo "  restart        - Restart all services"
-	@echo "  status         - Show service status and health"
-	@echo ""
-	@echo "Logs:"
-	@echo "  logs           - View all logs"
-	@echo "  logs-collector - View collector logs"
-	@echo "  logs-processor - View processor logs"
-	@echo "  logs-features  - View features logs"
+	@echo "  status         - Show service status"
 	@echo ""
 	@echo "Development:"
-	@echo "  test           - Run all tests"
-	@echo "  lint           - Lint all code"
-	@echo "  lint-fix       - Fix lint issues"
-	@echo "  fmt            - Format all code"
-	@echo "  rebuild        - Rebuild changed services"
-	@echo ""
-	@echo "Data:"
-	@echo "  inspect        - Inspect collected data"
-	@echo "  validate       - Validate data quality"
+	@echo "  test           - Run tests"
+	@echo "  validate-features - Validate feature Parquet files"
 	@echo "  stats          - Show data file stats"
 	@echo "  clean-data     - Clean data directories"
 	@echo "  clean          - Clean everything"
+	@echo ""
+	@echo "Training:"
+	@echo "  train          - Train TFT model"
+	@echo "  train-interactive - Interactive training shell"
+	@echo "  backtest       - Run backtest"
+	@echo ""
+	@echo "Logs:"
+	@echo "  logs           - View all logs"
+	@echo "  logs-<service> - View specific service logs"
+
