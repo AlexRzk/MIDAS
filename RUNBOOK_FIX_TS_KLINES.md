@@ -50,6 +50,17 @@ git stash pop
 
 ---
 
+### Verify compose services
+
+After pulling latest changes, make sure `tools` service is available in the current compose configuration:
+
+```bash
+docker compose config --services
+```
+
+You should see `tools` listed among the services. If not, run `git pull` again and make sure you are in the project root.
+
+
 ## 4. Verify New Files Exist
 
 ```bash
@@ -99,9 +110,12 @@ python -m pytest tests/ -v
 exit
 ```
 
-Or run directly:
+Or run directly using the tools container (installs required Python packages first):
 ```bash
-docker compose run --rm features python -m pytest tests/ -v
+# Build tools image (first time only)
+docker compose build tools
+
+docker compose run --rm tools python -m pytest tests/ -v
 ```
 
 Expected output:
@@ -119,8 +133,9 @@ tests/test_feature_presence.py ........ PASSED
 # Create reports directory if needed
 mkdir -p reports
 
-# Run validation
-docker compose run --rm features python scripts/validate_features.py \
+# Run validation using the tools container (repo mounted at /app):
+docker compose build tools
+docker compose run --rm tools python scripts/validate_features.py \
     --dir /app/data/features \
     --output /app/reports/validation_report.json
 ```
@@ -291,8 +306,8 @@ python training/train.py --help
 |------|---------|
 | Connect | `ssh olo@192.168.1.104` |
 | Pull code | `git pull origin main` |
-| Run tests | `docker compose run --rm features python -m pytest tests/ -v` |
-| Validate | `docker compose run --rm features python scripts/validate_features.py --dir /app/data/features` |
+| Run tests | `docker compose run --rm tools bash -lc "pip install -r requirements.txt && python -m pytest tests/ -v"` |
+| Validate | `docker compose run --rm tools bash -lc "pip install -r requirements.txt && python scripts/validate_features.py --dir /app/data/features --output /app/reports/validation_report.json"` |
 | Train | `docker compose -f docker-compose.training.yml up training` |
 | Backtest | `docker compose -f docker-compose.training.yml run backtest` |
 | TensorBoard | `http://192.168.1.104:6006` |

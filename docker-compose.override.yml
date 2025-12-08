@@ -14,6 +14,21 @@ services:
       - ./data/clean:/data/clean:ro
       - ./data/features:/data/features
 
+  # Tools service for local development: mount repo, run one-off commands
+  tools:
+    build:
+      context: .
+      dockerfile: Dockerfile.tools
+    image: midas-tools:latest
+    container_name: midas-tools-local
+    volumes:
+      - ./:/app
+    working_dir: /app
+    environment:
+      - PYTHONUNBUFFERED=1
+    entrypoint: ["/bin/bash", "-c"]
+    command: ["sleep infinity"]
+
 volumes:
   # Keep named volumes present to avoid brew-up differences in compose
   raw_data: {}

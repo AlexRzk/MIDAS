@@ -179,6 +179,24 @@ services:
     depends_on:
       - prometheus
 
+  # ============================================
+  # Tools container
+  # Used for running one-off scripts, validation, and debugging
+  # This mounts the repo into /app and allows running scripts that are not baked into other images
+  # Example: docker compose run --rm tools python scripts/validate_features.py --dir /app/data/features
+  tools:
+    image: python:3.11-slim
+    container_name: midas-tools
+    volumes:
+      - ./:/app
+    working_dir: /app
+    environment:
+      - PYTHONUNBUFFERED=1
+    entrypoint: ["/bin/bash", "-c"]
+    command: ["sleep infinity"]
+    networks:
+      - midas-network
+
 # ============================================
 # Named Volumes for Data Persistence
 # ============================================
