@@ -28,16 +28,15 @@ except ImportError:
     print("ERROR: polars not installed. Run: pip install polars")
     sys.exit(1)
 
-# Required columns for training (minimum set)
+# Required columns for training (minimum set - just OHLC)
 REQUIRED_COLUMNS_MIN = [
-    # OHLCV - minimum for price prediction
-    "open", "high", "low", "close", "volume",
+    "open", "high", "low", "close",
 ]
 
 # Full feature set (preferred but not all required)
 PREFERRED_COLUMNS = [
-    # OHLCV
-    "open", "high", "low", "close", "volume", "vwap",
+    # OHLCV (volume is preferred but not required)
+    "volume", "vwap",
     # Core features
     "midprice", "microprice", "spread",
     # Order flow
@@ -146,6 +145,8 @@ class TrainingDataValidator:
             schema = pl.read_parquet_schema(sample_file)
             columns = set(schema.names())
             
+            self.log_info(f"Available columns: {sorted(columns)}")
+            
             # Find timestamp column
             ts_col = None
             for col in TIMESTAMP_COLUMNS:
@@ -159,18 +160,26 @@ class TrainingDataValidator:
             
             self.log_info(f"Using timestamp column: '{ts_col}'")
             
-            # Check minimum required columns (OHLCV)
-            missing_min = set(REQUIRED_COLUMNS_MIN) - columns
-            if missing_min:
-                self.log_issue(f"Missing minimum required columns: {sorted(missing_min)}")
+            # Check minimum required columns (OHLC - volume not always available)
+            required_ohlc = ["open", "high", "low", "close"]
+            missing_ohlc = set(required_ohlc) - columns
+            if missing_ohlc:
+                self.log_issue(f"Missing minimum required columns: {sorted(missing_ohlc)}")
                 return False, ts_col
             
-            self.log_info(f"All {len(REQUIRED_COLUMNS_MIN)} minimum required columns present")
+            self.log_info(f"All {len(required_ohlc)} minimum required OHLC columns present")
+            
+            # Check for volume (nice to have but not required)
+            if "volume" not in columns:
+                self.log_info("Note: 'volume' column not present (using other features)")
             
             # Check preferred columns (nice to have)
             missing_pref = set(PREFERRED_COLUMNS) - columns
             if missing_pref:
-                self.log_info(f"Missing preferred features (will use available): {sorted(missing_pref)}")
+                present_features = [c for c in PREFERRED_COLUMNS if c in columns]
+                if present_features:
+                    self.log_info(f"Present features: {sorted(present_features)}")
+                self.log_info(f"Missing features (optional): {sorted(missing_pref)}")
             else:
                 self.log_info("All preferred features present")
             
