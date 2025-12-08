@@ -74,11 +74,13 @@ def summarize_feature_dir(path: Path):
     # compute per-second aggregate totals
     dfs = []
     for f in files:
+        # Read only needed columns for aggregation
         df = pl.read_parquet(f, columns=['ts','midprice'])
         if df.shape[0] == 0:
             continue
         df = df.with_columns(((pl.col('ts') // 1_000_000).alias('ts_s')))
-        df2 = df.groupby('ts_s').agg([pl.col('midprice').last().alias('mid')])
+        # Polars uses `group_by` rather than `groupby`
+        df2 = df.group_by('ts_s').agg([pl.col('midprice').last().alias('mid')])
         dfs.append(df2)
     if dfs:
         big = pl.concat(dfs)

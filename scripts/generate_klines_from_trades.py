@@ -16,7 +16,23 @@ import json
 import math
 import os
 from pathlib import Path
-from typing import Iterator
+from typing import Iteratorpython3 - <<'PY'
+import glob, polars as pl
+files = sorted(glob.glob('data/features/*.parquet'))
+dfs = []
+for f in files:
+    df = pl.read_parquet(f, columns=['ts','midprice'])
+    if df.shape[0] == 0:
+        continue
+    df = df.with_columns(((pl.col('ts') // 1_000_000).alias('ts_s')))
+    df2 = df.groupby('ts_s').agg([pl.col('midprice').last().alias('mid')])
+    dfs.append(df2)
+if dfs:
+    big = pl.concat(dfs)
+    print('Per-second timestamps:', big.shape[0])
+else:
+    print('No data files found.')
+PY
 
 import zstandard as zstd
 import polars as pl
