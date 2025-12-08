@@ -419,7 +419,16 @@ struct RotatingWriter {
 
 impl RotatingWriter {
     fn new(config: Config, stats: Arc<CollectorStats>) -> Result<Self> {
-        fs::create_dir_all(&config.raw_data_path)?;
+        debug!("Creating RotatingWriter with path: {:?}", config.raw_data_path);
+        fs::create_dir_all(&config.raw_data_path)
+            .with_context(|| format!("Failed to create directory: {:?}", config.raw_data_path))?;
+        
+        // Test write permissions
+        let test_file = config.raw_data_path.join(".writetest");
+        fs::write(&test_file, b"test")
+            .with_context(|| format!("No write permission in {:?}", config.raw_data_path))?;
+        fs::remove_file(&test_file).ok();
+        
         let mut writer = Self {
             config,
             current_file: None,
@@ -430,6 +439,7 @@ impl RotatingWriter {
             connection_id: 0,
         };
         writer.rotate_file()?;
+        debug!("RotatingWriter created successfully");
         Ok(writer)
     }
 
@@ -732,8 +742,12 @@ impl Collector {
 
         // Writer task
         let writer_handle = tokio::spawn(async move {
+            debug!("Writer task starting...");
             let mut writer = match RotatingWriter::new(config, stats.clone()) {
-                Ok(w) => w,
+                Ok(w) => {
+                    info!("Writer initialized successfully");
+                    w
+                },
                 Err(e) => {
                     error!("Failed to create writer: {}", e);
                     return;
@@ -744,6 +758,7 @@ impl Collector {
             let mut last_count = 0u64;
             let mut stats_interval = tokio::time::interval(Duration::from_secs(60));
 
+            debug!("Writer task entering main loop");
             loop {
                 tokio::select! {
                     Some(record) = rx.recv() => {
@@ -761,13 +776,16 @@ impl Collector {
                         let rate = (current - last_count) / 60;
                         let gaps = stats.sequence_gaps.load(Ordering::Relaxed);
                         let dropped = stats.dropped_messages.load(Ordering::Relaxed);
-                        info!(
+                        debug!(
                             "Stats: {} total, {} msg/sec, {} gaps, {} dropped, {} bytes",
                             current, rate, gaps, dropped, writer.bytes_written
                         );
                         last_count = current;
                     }
-                    else => break,
+                    else => {
+                        debug!("Writer task: channel closed, exiting loop");
+                        break;
+                    }
                 }
             }
 
@@ -813,15 +831,12 @@ impl Collector {
                                     Ok(record) => {
                                         match tx.try_send(record) {
                                             Ok(_) => {}
-                                            Err(mpsc::error::TrySendError::Full(record)) => {
+                                            Err(mpsc::error::TrySendError::Full(_record)) => {
                                                 self.stats.dropped_messages.fetch_add(1, Ordering::Relaxed);
-                                                warn!("Channel full, dropping message");
-                                                if record.record_type == "depth" {
-                                                    let _ = tx.send(record).await;
-                                                }
+                                                warn!("Channel full, dropping message (backpressure)");
                                             }
                                             Err(mpsc::error::TrySendError::Closed(_)) => {
-                                                error!("Channel closed, exiting");
+                                                error!("Channel closed unexpectedly - writer task likely crashed");
                                                 break;
                                             }
                                         }
