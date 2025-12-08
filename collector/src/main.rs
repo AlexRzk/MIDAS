@@ -612,6 +612,10 @@ impl Collector {
 
         let (ws_stream, response) = connect_async(&url)
             .await
+            .map_err(|e| {
+                error!("WebSocket connection error details: {:?}", e);
+                e
+            })
             .with_context(|| format!("Failed to connect to {}", url))?;
 
         info!("Connected! Response: {:?}", response.status());
