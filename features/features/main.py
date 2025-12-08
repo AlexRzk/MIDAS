@@ -218,6 +218,19 @@ class FeatureService:
             "returns",
             "volatility_20",
             "volatility_100",
+            # Advanced microstructure features
+            "kyle_lambda",
+            "vpin",
+            "bid_ladder_slope",
+            "ask_ladder_slope",
+            "bid_slope_ratio",
+            "ask_slope_ratio",
+            "queue_imb_1",
+            "queue_imb_2",
+            "queue_imb_3",
+            "queue_imb_4",
+            "queue_imb_5",
+            "vol_of_vol",
         ])
         
         return cols
