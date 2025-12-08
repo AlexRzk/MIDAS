@@ -1,4 +1,4 @@
-# MIDAS - Market Intelligence Data Acquisition System
+cd # MIDAS - Market Intelligence Data Acquisition System
 
 High-frequency crypto market data pipeline for ML-driven trading. Collects 100ms order book snapshots from Binance, computes microstructure features, and trains Temporal Fusion Transformer (TFT) models for price prediction.
 
@@ -17,22 +17,32 @@ High-frequency crypto market data pipeline for ML-driven trading. Collects 100ms
 git clone https://github.com/AlexRzk/MIDAS.git
 cd MIDAS
 cp .env.example .env
-make setup
-make build
-make up
+
+# Create required directories
+mkdir -p data/raw data/clean data/features models reports logs/{collector,processor,features}
+
+# Build and start services
+docker compose build
+docker compose up -d
 ```
 
 **Monitor collection:**
 ```bash
-make logs-collector  # WebSocket collection logs
-make logs-processor  # Order book reconstruction
-make logs-features   # Feature computation
-make stats           # Show collected data size
+docker compose logs -f collector   # WebSocket collection logs
+docker compose logs -f processor   # Order book reconstruction
+docker compose logs -f features    # Feature computation
+docker compose ps                  # Service status
+```
+
+**Check collected data:**
+```bash
+ls -lh data/features/              # Feature files
+du -sh data/features/              # Total size
 ```
 
 **Stop collection:**
 ```bash
-make down
+docker compose down
 ```
 
 Data is stored in:
@@ -44,6 +54,30 @@ Data is stored in:
 
 ## 2. Training on Vast.ai
 
+### Already Collecting Data?
+
+Great! You have feature files like:
+```
+features_20251208_172242_0000.parquet
+features_20251208_172257_0000.parquet
+...
+```
+
+**Quick validation:**
+```bash
+# Check how many feature files you have
+ls data/features/features_*.parquet | wc -l
+
+# Check total size
+du -sh data/features/
+
+# Validate features (optional)
+docker compose build tools
+docker compose run --rm tools bash -c "pip install -r features/requirements.txt && python scripts/validate_features.py --dir /app/data/features"
+```
+
+**Recommendation:** Collect at least 6-12 hours of continuous data before training for better model performance.
+
 ### Why Vast.ai?
 - GPU instances starting at $0.20/hour
 - RTX 4090 / A100 availability
@@ -53,23 +87,36 @@ Data is stored in:
 
 #### A. Prepare Data Locally
 
-Collect at least 12-24 hours of data:
+If you've been collecting data, check your progress:
 
 ```bash
-# Start collection
-make up
+# See what you have
+ls -lh data/features/
 
-# Wait 12-24 hours, then check data
-make stats
+# Count files (each file ≈ 1-2 hours of data)
+ls data/features/features_*.parquet | wc -l
 
-# Validate features
-make validate-features
-
-# Stop collection
-make down
+# Total data size
+du -sh data/features/
 ```
 
-Expected feature file size: ~100-500MB per 24 hours (BTCUSDT, 1-minute aggregation).
+**Minimum recommended:** 6-12 hours (6-12 files)
+**Optimal:** 24+ hours (24+ files)
+
+If you need more data, keep collection running:
+
+```bash
+# Check if still collecting
+docker compose ps
+
+# If stopped, restart
+docker compose up -d
+
+# Monitor
+docker compose logs -f features
+```
+
+Once you have enough data, proceed to upload.
 
 #### B. Create Vast.ai Instance
 
@@ -154,9 +201,10 @@ scp -P $VAST_PORT root@$VAST_IP:/workspace/models/normalizer.json models/
 #### F. Run Backtest Locally
 
 ```bash
-# Back on your local machine
+# Back on your local machine, build training image
 docker compose -f docker-compose.training.yml build training
 
+# Run backtest
 docker compose -f docker-compose.training.yml run --rm backtest \
     python training/backtest.py \
     --model /app/models/best_model.pt \
@@ -287,20 +335,36 @@ MIDAS/
 
 ## Commands Reference
 
+**All commands use Docker Compose directly - no Makefile needed!**
+
 | Task | Command |
 |------|---------|
-| Setup | `make setup` |
-| Build images | `make build` |
-| Start collection | `make up` |
-| Stop collection | `make down` |
-| View logs | `make logs` |
-| Data stats | `make stats` |
-| Run tests | `make test` |
-| Validate features | `make validate-features` |
-| Train (local GPU) | `make train` |
-| Backtest | `make backtest` |
-| Clean data | `make clean-data` |
-| Help | `make help` |
+| **Setup** | `cp .env.example .env && mkdir -p data/{raw,clean,features} models reports` |
+| **Build images** | `docker compose build` |
+| **Start collection** | `docker compose up -d` |
+| **Stop collection** | `docker compose down` |
+| **View logs (all)** | `docker compose logs -f` |
+| **View logs (specific)** | `docker compose logs -f <service>` (collector/processor/features) |
+| **Service status** | `docker compose ps` |
+| **Restart services** | `docker compose restart` |
+| **Data stats** | `ls -lh data/features/ && du -sh data/features/` |
+| **Run tests** | `docker compose run --rm tools bash -c "pip install -r features/requirements.txt && python -m pytest tests/ -v"` |
+| **Validate features** | `docker compose run --rm tools bash -c "pip install -r features/requirements.txt && python scripts/validate_features.py --dir /app/data/features"` |
+| **Train (local GPU)** | `docker compose -f docker-compose.training.yml up training` |
+| **Train (interactive)** | `docker compose -f docker-compose.training.yml run --rm training bash` |
+| **Backtest** | `docker compose -f docker-compose.training.yml run --rm backtest` |
+| **Clean data** | `rm -rf data/raw/* data/clean/* data/features/*` |
+| **Clean everything** | `docker compose down -v --rmi local` |
+| **Shell into container** | `docker compose exec <service> bash` |
+
+**Optional Makefile shortcuts:**
+If you prefer, you can still use `make` commands (they wrap the Docker commands above):
+- `make up` → `docker compose up -d`
+- `make down` → `docker compose down`
+- `make logs` → `docker compose logs -f`
+- `make test` → runs tests in tools container
+- `make train` → starts training
+- `make help` → shows all available targets
 
 ---
 
@@ -313,8 +377,18 @@ MIDAS/
 **Fix:** The pipeline auto-detects timestamp units. If you have old data, delete `data/features/` and reprocess:
 
 ```bash
-make clean-data
-make up
+# Stop services
+docker compose down
+
+# Backup old data (optional)
+mv data/features data/features_backup
+
+# Recreate directory
+mkdir -p data/features
+
+# Restart to reprocess
+docker compose up -d
+docker compose logs -f features
 ```
 
 ### Issue: Missing OHLCV columns
@@ -322,8 +396,10 @@ make up
 **Fix:** Recent code includes OHLC aggregation. Reprocess features:
 
 ```bash
+docker compose down
 rm -rf data/features/*
-docker compose restart features
+docker compose up -d features
+docker compose logs -f features
 ```
 
 ### Issue: Vast.ai instance out of disk space
