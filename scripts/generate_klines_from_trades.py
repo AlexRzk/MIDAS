@@ -117,7 +117,7 @@ def make_candles(trades_df: pl.DataFrame, interval_ms: int) -> pl.DataFrame:
     ]).collect()
 
     # Aggregation: open, high, low, close, volume, trades
-    grouped = trades_df.groupby("bucket_ts").agg([
+    grouped = trades_df.group_by("bucket_ts").agg([
         pl.col("price").first().alias("open"),
         pl.col("price").max().alias("high"),
         pl.col("price").min().alias("low"),
@@ -163,7 +163,7 @@ def main():
     if not rows:
         print("No trade events found in the selected source.")
         return
-    df = pl.DataFrame(rows, schema=["ts", "price", "quantity", "symbol"])
+    df = pl.DataFrame(rows, schema=["ts", "price", "quantity", "symbol"], orient="row")
 
     klines = make_candles(df, interval_ms)
     # Add human-friendly columns
