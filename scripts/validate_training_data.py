@@ -28,25 +28,26 @@ except ImportError:
     print("ERROR: polars not installed. Run: pip install polars")
     sys.exit(1)
 
-# Required columns for training (minimum set - just OHLC)
-REQUIRED_COLUMNS_MIN = [
-    "open", "high", "low", "close",
-]
+# Required columns for OHLC aggregated data
+REQUIRED_OHLC = ["open", "high", "low", "close"]
 
-# Full feature set (preferred but not all required)
-PREFERRED_COLUMNS = [
-    # OHLCV (volume is preferred but not required)
-    "volume", "vwap",
-    # Core features
-    "midprice", "microprice", "spread",
+# Required columns for raw orderbook features
+REQUIRED_ORDERBOOK = ["midprice", "spread", "bid_px_01", "ask_px_01"]
+
+# Preferred microstructure features
+PREFERRED_FEATURES = [
+    # Core
+    "microprice", "spread_bps",
     # Order flow
-    "ofi", "ofi_10",
+    "ofi", "ofi_10", "ofi_cumulative",
     # Imbalances
-    "imbalance_1", "imbalance_5", "imbalance_10",
-    # Volume metrics
-    "taker_buy_volume", "taker_sell_volume",
-    # Liquidity
-    "liquidity_1", "liquidity_5", "liquidity_10",
+    "imbalance", "imbalance_1", "imbalance_5", "imbalance_10",
+    # Volume
+    "taker_buy_volume", "taker_sell_volume", "volume_imbalance",
+    # Volatility
+    "volatility_20", "volatility_100",
+    # Advanced
+    "kyle_lambda", "vpin",
 ]
 
 # Timestamp column name (can be 'ts' or 'bucket')
@@ -160,28 +161,35 @@ class TrainingDataValidator:
             
             self.log_info(f"Using timestamp column: '{ts_col}'")
             
-            # Check minimum required columns (OHLC - volume not always available)
-            required_ohlc = ["open", "high", "low", "close"]
-            missing_ohlc = set(required_ohlc) - columns
-            if missing_ohlc:
-                self.log_issue(f"Missing minimum required columns: {sorted(missing_ohlc)}")
+            # Check if OHLC aggregated data
+            has_ohlc = all(col in columns for col in REQUIRED_OHLC)
+            # Check if raw orderbook data
+            has_orderbook = all(col in columns for col in REQUIRED_ORDERBOOK)
+            
+            if has_ohlc:
+                self.log_info("✓ Detected OHLC aggregated data")
+                if "volume" not in columns:
+                    self.log_info("  Note: 'volume' column not present")
+            elif has_orderbook:
+                self.log_info("✓ Detected raw orderbook feature data")
+                # Check for orderbook depth
+                max_level = 0
+                for i in range(1, 11):
+                    if f"bid_px_{i:02d}" in columns and f"ask_px_{i:02d}" in columns:
+                        max_level = i
+                self.log_info(f"  Orderbook depth: {max_level} levels")
+            else:
+                missing_ohlc = set(REQUIRED_OHLC) - columns
+                missing_orderbook = set(REQUIRED_ORDERBOOK) - columns
+                self.log_issue(f"Data must have either OHLC columns {REQUIRED_OHLC} or orderbook columns {REQUIRED_ORDERBOOK}")
+                self.log_issue(f"  Missing OHLC: {sorted(missing_ohlc)}")
+                self.log_issue(f"  Missing orderbook: {sorted(missing_orderbook)}")
                 return False, ts_col
             
-            self.log_info(f"All {len(required_ohlc)} minimum required OHLC columns present")
-            
-            # Check for volume (nice to have but not required)
-            if "volume" not in columns:
-                self.log_info("Note: 'volume' column not present (using other features)")
-            
-            # Check preferred columns (nice to have)
-            missing_pref = set(PREFERRED_COLUMNS) - columns
-            if missing_pref:
-                present_features = [c for c in PREFERRED_COLUMNS if c in columns]
-                if present_features:
-                    self.log_info(f"Present features: {sorted(present_features)}")
-                self.log_info(f"Missing features (optional): {sorted(missing_pref)}")
-            else:
-                self.log_info("All preferred features present")
+            # Check preferred microstructure features
+            present_features = [c for c in PREFERRED_FEATURES if c in columns]
+            if present_features:
+                self.log_info(f"  Microstructure features ({len(present_features)}): {', '.join(sorted(present_features)[:10])}{'...' if len(present_features) > 10 else ''}")
             
             # Check optional
             present_optional = set(OPTIONAL_COLUMNS) & columns
@@ -208,8 +216,9 @@ class TrainingDataValidator:
             if df[ts_col].dtype not in [pl.Int64, pl.UInt64]:
                 self.log_warning(f"Timestamp column '{ts_col}' has unexpected type: {df[ts_col].dtype}")
             
-            # Check numeric columns
-            for col in REQUIRED_COLUMNS_MIN:
+            # Check numeric columns (OHLC or orderbook)
+            check_cols = REQUIRED_OHLC if all(c in df.columns for c in REQUIRED_OHLC) else REQUIRED_ORDERBOOK
+            for col in check_cols:
                 if col in df.columns:
                     if df[col].dtype not in [pl.Float64, pl.Float32, pl.Int64, pl.Int32]:
                         self.log_warning(f"Column '{col}' has non-numeric type: {df[col].dtype}")
@@ -284,11 +293,13 @@ class TrainingDataValidator:
         try:
             df = pl.read_parquet(sample_file)
             
-            # Check for nulls in minimum required columns
+            # Check for nulls in key columns
             null_counts = df.null_count()
             has_nulls = False
             
-            for col in REQUIRED_COLUMNS_MIN:
+            # Check OHLC or orderbook columns
+            check_cols = REQUIRED_OHLC if all(c in df.columns for c in REQUIRED_OHLC) else REQUIRED_ORDERBOOK
+            for col in check_cols:
                 if col in df.columns:
                     null_count = null_counts[col][0]
                     if null_count > 0:
@@ -297,7 +308,7 @@ class TrainingDataValidator:
                         has_nulls = True
             
             if not has_nulls:
-                self.log_info("No null values in required columns")
+                self.log_info("No null values in key columns")
             
             # Check timestamp monotonicity
             ts_diff = df[ts_col].diff()
@@ -307,16 +318,17 @@ class TrainingDataValidator:
                 self.log_info("Timestamps are monotonically increasing")
             
             # Check for reasonable value ranges
-            if "close" in df.columns:
-                close_min = df["close"].min()
-                close_max = df["close"].max()
+            price_col = "close" if "close" in df.columns else "midprice" if "midprice" in df.columns else None
+            if price_col:
+                price_min = df[price_col].min()
+                price_max = df[price_col].max()
                 
-                if close_min <= 0:
-                    self.log_warning(f"Close price has invalid values: min={close_min}")
-                elif close_max / close_min > 100:
-                    self.log_warning(f"Extreme price range: {close_min:.2f} to {close_max:.2f}")
+                if price_min <= 0:
+                    self.log_warning(f"{price_col} has invalid values: min={price_min}")
+                elif price_max / price_min > 100:
+                    self.log_warning(f"Extreme price range: {price_min:.2f} to {price_max:.2f}")
                 else:
-                    self.log_info(f"Price range looks reasonable: {close_min:.2f} to {close_max:.2f}")
+                    self.log_info(f"Price range ({price_col}): {price_min:.2f} to {price_max:.2f}")
             
             return True
             
