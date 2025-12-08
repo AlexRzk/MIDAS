@@ -98,21 +98,21 @@ class TrainingDataValidator:
     
     def find_feature_files(self) -> List[Path]:
         """Find all feature Parquet files."""
-        patterns = ["features_*.parquet", "aggregated_*.parquet"]
-        files = []
+        # Prioritize raw features over aggregated
+        raw_features = sorted(self.data_dir.glob("features_*.parquet"))
+        aggregated = sorted(self.data_dir.glob("aggregated_1m.parquet"))
         
-        for pattern in patterns:
-            files.extend(self.data_dir.glob(pattern))
-        
-        # Remove duplicates and sort
-        files = sorted(set(files))
-        
-        if not files:
-            self.log_issue(f"No feature files found matching patterns: {patterns}")
+        if raw_features:
+            self.log_info(f"Found {len(raw_features)} raw feature files (will use these for training)")
+            if aggregated:
+                self.log_info(f"Note: Ignoring {len(aggregated)} aggregated files (raw features preferred)")
+            return raw_features
+        elif aggregated:
+            self.log_info(f"Found {len(aggregated)} aggregated files")
+            return aggregated
+        else:
+            self.log_issue("No feature files found")
             return []
-        
-        self.log_info(f"Found {len(files)} feature files")
-        return files
     
     def check_file_readability(self, files: List[Path]) -> List[Path]:
         """Check which files are readable."""
