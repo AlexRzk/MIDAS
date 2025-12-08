@@ -93,6 +93,8 @@ def main():
     group.add_argument("--dir", "-d", type=Path, help="Directory with Parquet files to inspect")
     parser.add_argument("--latest", action="store_true", help="Pick latest file in directory")
     parser.add_argument("--rows", type=int, default=5, help="Number of head rows to show")
+    parser.add_argument("--show-columns", action="store_true", help="Display full list of columns")
+    parser.add_argument("--recompute", action="store_true", help="Recompute missing columns (e.g., spread_bps) for basic checks")
     parser.add_argument("--raw", action="store_true", help="Also attempt to print a column sample for raw columns")
 
     args = parser.parse_args()
@@ -156,6 +158,9 @@ def main():
     print("Columns and types:")
     for c, t in zip(head.columns, head.dtypes):
         print(f"  {c}: {t}")
+    if args.show_columns:
+        print("\nFull columns:")
+        print(head.columns)
 
     print("\nFirst rows:")
     print(head)
@@ -200,6 +205,16 @@ def main():
                 print(f"  {c}: min={vmin:.6g}, mean={mean:.6g}, max={vmax:.6g}")
             except Exception as e:
                 print(f"  {c}: error computing stats: {e}")
+
+    # If spread_bps missing but spread exists, optionally recompute
+    if args.recompute and 'spread_bps' not in head.columns and 'bid_px_01' in head.columns and 'ask_px_01' in head.columns and 'midprice' in head.columns:
+        print("\nRecomputing spread_bps: (ask_px_01 - bid_px_01) / midprice * 10000")
+        try:
+            full_df = pl.read_parquet(path, columns=['bid_px_01', 'ask_px_01', 'midprice'])
+            spread_bps = ((full_df['ask_px_01'] - full_df['bid_px_01']) / full_df['midprice']) * 10000
+            print("  spread_bps stats: min=", float(spread_bps.min()), "mean=", float(spread_bps.mean()), "max=", float(spread_bps.max()))
+        except Exception as e:
+            print("  Failed to compute spread_bps:", e)
 
     print("\nDone.")
 
