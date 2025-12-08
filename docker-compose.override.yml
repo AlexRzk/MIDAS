@@ -1,0 +1,23 @@
+version: '3.9'
+
+# Local development override: Use relative bind mounts (./data/...) rather than named volumes with driver_opts.
+# This avoids Docker requiring the host folders to pre-exist when compose tries to create or mount the named volumes.
+
+services:
+  collector:
+    volumes:
+      - ./data/raw:/data/raw
+  processor:
+    volumes:
+      - ./data/raw:/data/raw:ro
+      - ./data/clean:/data/clean
+  features:
+    volumes:
+      - ./data/clean:/data/clean:ro
+      - ./data/features:/data/features
+
+volumes:
+  # Keep named volumes present to avoid brew-up differences in compose
+  raw_data: {}
+  clean_data: {}
+  features_data: {}
