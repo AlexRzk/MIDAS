@@ -28,9 +28,14 @@ except ImportError:
     print("ERROR: polars not installed. Run: pip install polars")
     sys.exit(1)
 
-# Required columns for training
-REQUIRED_COLUMNS = [
-    "ts",  # Timestamp
+# Required columns for training (minimum set)
+REQUIRED_COLUMNS_MIN = [
+    # OHLCV - minimum for price prediction
+    "open", "high", "low", "close", "volume",
+]
+
+# Full feature set (preferred but not all required)
+PREFERRED_COLUMNS = [
     # OHLCV
     "open", "high", "low", "close", "volume", "vwap",
     # Core features
@@ -44,6 +49,9 @@ REQUIRED_COLUMNS = [
     # Liquidity
     "liquidity_1", "liquidity_5", "liquidity_10",
 ]
+
+# Timestamp column name (can be 'ts' or 'bucket')
+TIMESTAMP_COLUMNS = ["ts", "bucket"]
 
 OPTIONAL_COLUMNS = [
     "spread_bps", "signed_volume", "volume_imbalance",
@@ -126,10 +134,10 @@ class TrainingDataValidator:
         
         return readable
     
-    def check_columns(self, files: List[Path]) -> bool:
-        """Verify all required columns are present."""
+    def check_columns(self, files: List[Path]) -> Tuple[bool, str]:
+        """Verify all required columns are present. Returns (success, timestamp_col_name)."""
         if not files:
-            return False
+            return False, ""
         
         # Check first file as representative
         sample_file = files[0]
@@ -138,28 +146,48 @@ class TrainingDataValidator:
             schema = pl.read_parquet_schema(sample_file)
             columns = set(schema.names())
             
-            missing = set(REQUIRED_COLUMNS) - columns
+            # Find timestamp column
+            ts_col = None
+            for col in TIMESTAMP_COLUMNS:
+                if col in columns:
+                    ts_col = col
+                    break
             
-            if missing:
-                self.log_issue(f"Missing required columns: {sorted(missing)}")
-                return False
+            if not ts_col:
+                self.log_issue(f"Missing timestamp column (expected one of: {TIMESTAMP_COLUMNS})")
+                return False, ""
             
-            self.log_info(f"All {len(REQUIRED_COLUMNS)} required columns present")
+            self.log_info(f"Using timestamp column: '{ts_col}'")
+            
+            # Check minimum required columns (OHLCV)
+            missing_min = set(REQUIRED_COLUMNS_MIN) - columns
+            if missing_min:
+                self.log_issue(f"Missing minimum required columns: {sorted(missing_min)}")
+                return False, ts_col
+            
+            self.log_info(f"All {len(REQUIRED_COLUMNS_MIN)} minimum required columns present")
+            
+            # Check preferred columns (nice to have)
+            missing_pref = set(PREFERRED_COLUMNS) - columns
+            if missing_pref:
+                self.log_info(f"Missing preferred features (will use available): {sorted(missing_pref)}")
+            else:
+                self.log_info("All preferred features present")
             
             # Check optional
             present_optional = set(OPTIONAL_COLUMNS) & columns
             if present_optional:
                 self.log_info(f"Optional columns present: {sorted(present_optional)}")
             
-            return True
+            return True, ts_col
             
         except Exception as e:
             self.log_issue(f"Failed to read schema from {sample_file.name}: {e}")
-            return False
+            return False, ""
     
-    def check_data_types(self, files: List[Path]) -> bool:
+    def check_data_types(self, files: List[Path], ts_col: str) -> bool:
         """Check data types are appropriate."""
-        if not files:
+        if not files or not ts_col:
             return False
         
         sample_file = files[0]
@@ -168,12 +196,11 @@ class TrainingDataValidator:
             df = pl.read_parquet(sample_file)
             
             # Check timestamp is integer (microseconds)
-            if df["ts"].dtype not in [pl.Int64, pl.UInt64]:
-                self.log_warning(f"Timestamp column 'ts' has unexpected type: {df['ts'].dtype}")
+            if df[ts_col].dtype not in [pl.Int64, pl.UInt64]:
+                self.log_warning(f"Timestamp column '{ts_col}' has unexpected type: {df[ts_col].dtype}")
             
             # Check numeric columns
-            numeric_cols = [c for c in REQUIRED_COLUMNS if c != "ts"]
-            for col in numeric_cols:
+            for col in REQUIRED_COLUMNS_MIN:
                 if col in df.columns:
                     if df[col].dtype not in [pl.Float64, pl.Float32, pl.Int64, pl.Int32]:
                         self.log_warning(f"Column '{col}' has non-numeric type: {df[col].dtype}")
@@ -185,9 +212,9 @@ class TrainingDataValidator:
             self.log_issue(f"Failed to check data types: {e}")
             return False
     
-    def check_data_quantity(self, files: List[Path]) -> Tuple[int, float]:
+    def check_data_quantity(self, files: List[Path], ts_col: str) -> Tuple[int, float]:
         """Check total rows and time coverage."""
-        if not files:
+        if not files or not ts_col:
             return 0, 0.0
         
         total_rows = 0
@@ -196,11 +223,11 @@ class TrainingDataValidator:
         
         for file in files:
             try:
-                df = pl.read_parquet(file, columns=["ts"])
+                df = pl.read_parquet(file, columns=[ts_col])
                 total_rows += len(df)
                 
-                file_min = df["ts"].min()
-                file_max = df["ts"].max()
+                file_min = df[ts_col].min()
+                file_max = df[ts_col].max()
                 
                 if min_ts is None or file_min < min_ts:
                     min_ts = file_min
@@ -238,9 +265,9 @@ class TrainingDataValidator:
         
         return total_rows, 0.0
     
-    def check_data_quality(self, files: List[Path]) -> bool:
+    def check_data_quality(self, files: List[Path], ts_col: str) -> bool:
         """Check for null values, outliers, and monotonicity."""
-        if not files:
+        if not files or not ts_col:
             return False
         
         sample_file = files[0]
@@ -248,11 +275,11 @@ class TrainingDataValidator:
         try:
             df = pl.read_parquet(sample_file)
             
-            # Check for nulls
+            # Check for nulls in minimum required columns
             null_counts = df.null_count()
             has_nulls = False
             
-            for col in REQUIRED_COLUMNS:
+            for col in REQUIRED_COLUMNS_MIN:
                 if col in df.columns:
                     null_count = null_counts[col][0]
                     if null_count > 0:
@@ -264,7 +291,7 @@ class TrainingDataValidator:
                 self.log_info("No null values in required columns")
             
             # Check timestamp monotonicity
-            ts_diff = df["ts"].diff()
+            ts_diff = df[ts_col].diff()
             if (ts_diff < 0).any():
                 self.log_warning("Timestamps are not monotonically increasing")
             else:
@@ -288,9 +315,9 @@ class TrainingDataValidator:
             self.log_issue(f"Failed to check data quality: {e}")
             return False
     
-    def check_time_consistency(self, files: List[Path]) -> bool:
+    def check_time_consistency(self, files: List[Path], ts_col: str) -> bool:
         """Check that time buckets are consistent (e.g., 1-minute intervals)."""
-        if not files:
+        if not files or not ts_col:
             return False
         
         sample_file = files[0]
@@ -303,7 +330,7 @@ class TrainingDataValidator:
                 return True
             
             # Calculate time differences
-            ts_diff = df["ts"].diff().drop_nulls()
+            ts_diff = df[ts_col].diff().drop_nulls()
             
             if len(ts_diff) == 0:
                 return True
@@ -364,25 +391,30 @@ class TrainingDataValidator:
             return results
         
         # Check 4: Columns
-        columns_ok = self.check_columns(readable_files)
+        columns_ok, ts_col = self.check_columns(readable_files)
         results["checks"]["columns"] = columns_ok
+        results["timestamp_column"] = ts_col
+        
+        if not columns_ok or not ts_col:
+            results["passed"] = False
+            return results
         
         # Check 5: Data types
-        types_ok = self.check_data_types(readable_files)
+        types_ok = self.check_data_types(readable_files, ts_col)
         results["checks"]["data_types"] = types_ok
         
         # Check 6: Quantity
-        total_rows, hours = self.check_data_quantity(readable_files)
+        total_rows, hours = self.check_data_quantity(readable_files, ts_col)
         results["total_rows"] = total_rows
         results["hours_coverage"] = hours
         results["checks"]["sufficient_data"] = hours >= self.min_hours
         
         # Check 7: Quality
-        quality_ok = self.check_data_quality(readable_files)
+        quality_ok = self.check_data_quality(readable_files, ts_col)
         results["checks"]["data_quality"] = quality_ok
         
         # Check 8: Time consistency
-        time_ok = self.check_time_consistency(readable_files)
+        time_ok = self.check_time_consistency(readable_files, ts_col)
         results["checks"]["time_consistency"] = time_ok
         
         # Summary
