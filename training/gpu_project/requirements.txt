@@ -1,0 +1,26 @@
+# MIDAS GPU Training - Requirements
+# Install with: pip install -r requirements.txt
+
+# Core ML packages
+numpy>=1.20.0
+polars>=0.18.0
+scikit-learn>=1.0.0
+
+# Deep learning
+torch>=2.0.0
+# For GPU: pip install torch --index-url https://download.pytorch.org/whl/cu121
+
+# Gradient boosting
+xgboost>=1.7.0
+
+# Visualization
+matplotlib>=3.5.0
+
+# Hyperparameter optimization (optional)
+optuna>=3.0.0
+
+# Model serialization
+joblib>=1.0.0
+
+# System info
+psutil>=5.8.0

@@ -15,6 +15,7 @@ from watchdog.events import FileSystemEventHandler, FileCreatedEvent
 from .config import FeatureConfig
 from .compute import time_bucket_aggregate
 from .writer import FeatureWriter
+from .normalize import FeatureNormalizer
 
 # Configure structured logging
 structlog.configure(
@@ -95,6 +96,12 @@ class FeatureService:
             row_group_size=config.parquet_row_group_size,
         )
         
+        # Initialize normalizer
+        scaler_dir = config.features_data_path.parent / "scalers"
+        self.normalizer = FeatureNormalizer(scaler_dir)
+        self._normalization_enabled = os.getenv("ENABLE_NORMALIZATION", "true").lower() in ("1", "true")
+        self._is_first_file = True  # Track first file for fitting scalers
+        
         self._running = True
         self._processed_files: set[str] = set()
         self._processed_files_path = config.features_data_path / ".processed_files"
@@ -148,6 +155,10 @@ class FeatureService:
             # Select output columns (drop intermediate columns)
             output_cols = self._get_output_columns(df)
             df = df.select([c for c in output_cols if c in df.columns])
+            
+            # Apply normalization (if enabled)
+            if self._normalization_enabled:
+                df = self._apply_normalization(df, filepath_str)
             
             # Write to Parquet
             output_name = f"features_{filepath.stem.replace('clean_', '')}.parquet"
@@ -242,6 +253,37 @@ class FeatureService:
         ])
         
         return cols
+    
+    def _apply_normalization(self, df: pl.DataFrame, filepath: str) -> pl.DataFrame:
+        """
+        Apply feature normalization.
+        
+        On first file: fit scalers and save them
+        On subsequent files: load and apply scalers
+        """
+        try:
+            # Check if scalers already exist
+            scaler_manifest = self.normalizer.scaler_dir / "normalization_manifest.json"
+            
+            if scaler_manifest.exists() and not self._is_first_file:
+                # Load existing scalers and transform
+                self.normalizer = FeatureNormalizer.load(self.normalizer.scaler_dir)
+                df_norm = self.normalizer.transform(df)
+                logger.info("applied_normalization", path=filepath, loaded_scalers=True)
+            else:
+                # First file or no scalers yet - fit and transform
+                logger.info("fitting_normalization_scalers", path=filepath)
+                df_norm = self.normalizer.fit_transform(df, is_training=True)
+                self.normalizer.save()
+                logger.info("saved_normalization_scalers", scaler_dir=str(self.normalizer.scaler_dir))
+                self._is_first_file = False
+            
+            return df_norm
+            
+        except Exception as e:
+            logger.error("normalization_error", path=filepath, error=str(e))
+            logger.warning("skipping_normalization_for_this_file")
+            return df
     
     def process_all_pending(self):
         """Process all unprocessed files."""
