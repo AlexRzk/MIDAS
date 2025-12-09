@@ -9,6 +9,9 @@ set -e
 # Defaults
 DATA_DIR="data/features_normalized"
 OUTPUT_DIR="outputs"
+BACKTEST_PER_ITERATION=false
+BACKTEST_INTERVAL=10
+BACKTEST_METRIC="total_pnl_bps"
 
 # Interactive model selection if no argument provided
 if [ $# -eq 0 ]; then
@@ -20,6 +23,7 @@ if [ $# -eq 0 ]; then
     echo "  1) XGBoost (GPU-accelerated, fastest, recommended)"
     echo "  2) LSTM (PyTorch, GPU)"
     echo "  3) Linear Ridge (baseline)"
+    echo "  4) XGBoost with per-iteration backtest (keep best model via trading metric)"
     echo ""
     read -p "Enter choice [1-3]: " choice
     
@@ -27,6 +31,7 @@ if [ $# -eq 0 ]; then
         1) MODEL="xgboost";;
         2) MODEL="lstm";;
         3) MODEL="linear";;
+        4) MODEL="xgboost-backtest";;
         *) echo "Invalid choice"; exit 1;;
     esac
 else
@@ -54,6 +59,19 @@ case "$MODEL" in
             --target-type return \
             --target-horizon 10 \
             --train-ratio 0.8
+        ;;
+    
+    xgboost-backtest)
+        echo "Starting XGBoost with per-iteration backtest..."
+        python3 training/gpu_project/train_xgboost.py \
+            --data-dir "$DATA_DIR" \
+            --output-dir "$OUTPUT_DIR/xgboost_bt_$(date +%Y%m%d_%H%M%S)" \
+            --target-type return \
+            --target-horizon 10 \
+            --train-ratio 0.8 \
+            --backtest-per-iteration \
+            --backtest-interval $BACKTEST_INTERVAL \
+            --backtest-metric $BACKTEST_METRIC
         ;;
     
     xgboost-tuned)

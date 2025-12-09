@@ -150,8 +150,17 @@ def evaluate_model(
     ts_test: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
     """Evaluate model on test set."""
-    # Predict
-    y_pred = model.predict(X_test)
+    # Predict - support both Booster and sklearn XGBRegressor
+    try:
+        is_booster = isinstance(model, xgb.Booster)
+    except Exception:
+        is_booster = False
+
+    if is_booster:
+        dtest = xgb.DMatrix(X_test)
+        y_pred = model.predict(dtest)
+    else:
+        y_pred = model.predict(X_test)
     
     # Compute metrics
     reg_metrics = compute_regression_metrics(y_test, y_pred)
@@ -177,7 +186,11 @@ def get_feature_importance(
     importance_type: str = "gain",
 ) -> Dict[str, float]:
     """Get feature importance scores."""
-    importance = model.get_booster().get_score(importance_type=importance_type)
+    try:
+        booster = model.get_booster() if hasattr(model, "get_booster") else model
+    except Exception:
+        booster = model
+    importance = booster.get_score(importance_type=importance_type)
     
     # Map to feature names
     result = {}
@@ -259,6 +272,9 @@ def run_training_pipeline(
     train_ratio: float = 0.8,
     do_hyperparameter_search: bool = False,
     n_trials: int = 30,
+    do_backtest_per_iteration: bool = False,
+    backtest_interval: int = 1,
+    backtest_metric: str = "total_pnl_bps",
 ) -> Dict[str, Any]:
     """
     Run full XGBoost training pipeline.
@@ -359,13 +375,96 @@ def run_training_pipeline(
         params = hyperparameter_search(X_train_fit, y_train_fit, X_val, y_val, n_trials)
     else:
         params = get_gpu_params(DEFAULT_PARAMS.copy())
-    
-    model, train_info = train_xgboost(
-        X_train_fit, y_train_fit,
-        X_val, y_val,
-        params,
-        feature_names,
-    )
+    # If backtest per iteration is enabled, use the lower-level xgb.train with a callback
+    if do_backtest_per_iteration:
+        logger.info("Running training with per-iteration backtesting enabled")
+        # Convert to DMatrix
+        dtrain = xgb.DMatrix(X_train_fit, label=y_train_fit)
+        dval = xgb.DMatrix(X_val, label=y_val)
+        dtest = xgb.DMatrix(X_test, label=y_test)
+
+        num_boost_round = params.pop("n_estimators", 500)
+        early_stopping = params.pop("early_stopping_rounds", 50)
+
+        # State for best backtest
+        best_bt = {"value": float("-inf"), "iter": -1}
+
+        class BacktestCallback(xgb.callback.TrainingCallback):
+            def __init__(self, dtest, y_test, ts_test, interval, metric, outdir):
+                self.dtest = dtest
+                self.y_test = y_test
+                self.ts_test = ts_test
+                self.interval = interval
+                self.metric = metric
+                self.outdir = outdir
+                self.best_value = float("-inf")
+                self.best_it = -1
+
+            def after_iteration(self, env) -> bool:
+                it = env.iteration
+                if (it + 1) % self.interval != 0:
+                    return False
+                booster = env.model
+                try:
+                    pred = booster.predict(self.dtest, iteration_range=(0, it + 1))
+                except Exception:
+                    pred = booster.predict(self.dtest, ntree_limit=it + 1)
+
+                metrics_bt = compute_trading_metrics(self.y_test, pred, self.ts_test)
+                value = metrics_bt.get(self.metric)
+                if value is None:
+                    return False
+
+                if value > self.best_value:
+                    self.best_value = value
+                    self.best_it = it + 1
+                    out_path = self.outdir / f"best_model_iter_{it+1}.json"
+                    booster.save_model(str(out_path))
+                    # Save metrics snapshot
+                    save_metrics({
+                        "iteration": it + 1,
+                        "backtest_metric": self.metric,
+                        "metric_value": value,
+                        "metrics": metrics_bt,
+                    }, self.outdir / f"best_backtest_iter_{it+1}.json")
+                return False
+
+        # Train using xgb.train
+        evals = [(dtrain, "train"), (dval, "validation")]
+        backtest_cb = BacktestCallback(dtest, y_test, ts_test, backtest_interval, backtest_metric, output_dir)
+        backtest_cb = BacktestCallback(dtest, y_test, ts_test, backtest_interval, backtest_metric, output_dir)
+        bst = xgb.train(
+            params,
+            dtrain,
+            num_boost_round=num_boost_round,
+            evals=evals,
+            early_stopping_rounds=early_stopping,
+            verbose_eval=False,
+            callbacks=[xgb.callback.EvaluationMonitor(show_stdv=False), backtest_cb],
+        )
+
+        # create a small info
+        train_info = {
+            "train_time_seconds": 0,
+            "best_iteration": bst.best_iteration if hasattr(bst, "best_iteration") else bst.best_ntree_limit if hasattr(bst, "best_ntree_limit") else num_boost_round,
+            "n_features": X_train_fit.shape[1],
+            "n_train_samples": X_train_fit.shape[0],
+            "n_val_samples": X_val.shape[0],
+        }
+        model = bst
+        # expose best backtest info
+        results["backtest"] = {
+            "best_iteration": backtest_cb.best_it,
+            "best_value": backtest_cb.best_value,
+            "best_model_path": str(output_dir / f"best_model_iter_{backtest_cb.best_it}.json") if backtest_cb.best_it > 0 else None,
+        }
+    else:
+        model, train_info = train_xgboost(
+            X_train_fit, y_train_fit,
+            X_val, y_val,
+            params,
+            feature_names,
+        )
     
     results["training"] = train_info
     results["params"] = {k: v for k, v in params.items() if not callable(v)}
@@ -440,6 +539,9 @@ def main():
     parser.add_argument("--train-ratio", type=float, default=0.8, help="Train/test split ratio")
     parser.add_argument("--hyperparameter-search", action="store_true", help="Run Optuna search")
     parser.add_argument("--n-trials", type=int, default=30, help="Number of Optuna trials")
+    parser.add_argument("--backtest-per-iteration", action="store_true", help="Run backtest on test set per boosting iteration and record best model")
+    parser.add_argument("--backtest-interval", type=int, default=10, help="Backtest every N boosting iterations")
+    parser.add_argument("--backtest-metric", type=str, default="total_pnl_bps", help="Backtest metric to maximize (e.g., total_pnl_bps, sharpe_ratio)")
     
     args = parser.parse_args()
     
@@ -454,6 +556,9 @@ def main():
         train_ratio=args.train_ratio,
         do_hyperparameter_search=args.hyperparameter_search,
         n_trials=args.n_trials,
+        do_backtest_per_iteration=args.backtest_per_iteration,
+        backtest_interval=args.backtest_interval,
+        backtest_metric=args.backtest_metric,
     )
     
     return results
