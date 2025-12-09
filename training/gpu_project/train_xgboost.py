@@ -497,7 +497,17 @@ def run_training_pipeline(
     logger.info(f"  MSE: {test_metrics['regression']['mse']:.6f}")
     logger.info(f"  MAE: {test_metrics['regression']['mae']:.6f}")
     logger.info(f"  R²: {test_metrics['regression']['r2']:.4f}")
-    logger.info(f"  Directional Accuracy: {test_metrics['directional']['directional_accuracy']:.2%}")
+    logger.info(f"  Directional Accuracy (percentile): {test_metrics['directional']['directional_accuracy']:.2%}")
+    logger.info(f"  Directional Accuracy (sign-based): {test_metrics['directional'].get('sign_based_accuracy', 0):.2%}")
+    logger.info(f"  Threshold used: {test_metrics['directional'].get('threshold_used', 0):.6f}")
+    logger.info(f"  Up: {test_metrics['directional']['up_count']:,} ({test_metrics['directional']['up_accuracy']:.2%})")
+    logger.info(f"  Down: {test_metrics['directional']['down_count']:,} ({test_metrics['directional']['down_accuracy']:.2%})")
+    logger.info(f"  Flat: {test_metrics['directional']['flat_count']:,}")
+    if 'trading' in test_metrics and test_metrics['trading']:
+        logger.info(f"\nTrading Metrics:")
+        logger.info(f"  Total PnL: {test_metrics['trading'].get('total_pnl_bps', 0):.2f} bps")
+        logger.info(f"  Sharpe Ratio: {test_metrics['trading'].get('sharpe_ratio', 0):.2f}")
+        logger.info(f"  Win Rate: {test_metrics['trading'].get('win_rate', 0):.2%}")
     logger.info(f"{'='*40}")
     
     # Feature importance
