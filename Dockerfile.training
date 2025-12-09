@@ -6,7 +6,7 @@
 # Run:
 #   docker run --gpus all -v $(pwd)/data:/app/data -v $(pwd)/models:/app/models midas-training:latest
 #
-FROM nvidia/cuda:12.1-runtime-ubuntu22.04
+FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
 
 # Prevent timezone prompt
 ENV DEBIAN_FRONTEND=noninteractive
@@ -35,11 +35,8 @@ ENV PATH="/opt/venv/bin:$PATH"
 # Upgrade pip
 RUN pip install --no-cache-dir --upgrade pip wheel setuptools
 
-# Install PyTorch with CUDA support first
-RUN pip install --no-cache-dir \
-    torch==2.1.0+cu121 \
-    torchvision==0.16.0+cu121 \
-    --extra-index-url https://download.pytorch.org/whl/cu121
+# PyTorch is provided by the base image (pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime).
+# This avoids mismatched CUDA toolkit / PyTorch binary tags and speeds up image build.
 
 # Install training dependencies
 RUN pip install --no-cache-dir \
