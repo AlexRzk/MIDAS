@@ -400,26 +400,39 @@ def run_training_pipeline(
                 self.best_value = float("-inf")
                 self.best_it = -1
 
-            def after_iteration(self, env) -> bool:
-                it = env.iteration
+            def after_iteration(self, model, epoch, evals_log) -> bool:
+                """Called after each training iteration.
+                
+                Args:
+                    model: The XGBoost Booster being trained
+                    epoch: Current iteration number (0-based)
+                    evals_log: Dictionary of evaluation results history
+                
+                Returns:
+                    False to continue training, True to stop early
+                """
+                it = epoch  # epoch is 0-based
                 if (it + 1) % self.interval != 0:
                     return False
-                booster = env.model
+                
                 try:
-                    pred = booster.predict(self.dtest, iteration_range=(0, it + 1))
+                    pred = model.predict(self.dtest, iteration_range=(0, it + 1))
                 except Exception:
-                    pred = booster.predict(self.dtest, ntree_limit=it + 1)
+                    pred = model.predict(self.dtest, ntree_limit=it + 1)
 
                 metrics_bt = compute_trading_metrics(self.y_test, pred, self.ts_test)
                 value = metrics_bt.get(self.metric)
                 if value is None:
                     return False
 
+                logger.info(f"[Backtest @ iter {it+1}] {self.metric}={value:.4f}")
+
                 if value > self.best_value:
                     self.best_value = value
                     self.best_it = it + 1
                     out_path = self.outdir / f"best_model_iter_{it+1}.json"
-                    booster.save_model(str(out_path))
+                    model.save_model(str(out_path))
+                    logger.info(f"  → New best model saved: {out_path.name}")
                     # Save metrics snapshot
                     save_metrics({
                         "iteration": it + 1,
@@ -431,7 +444,6 @@ def run_training_pipeline(
 
         # Train using xgb.train
         evals = [(dtrain, "train"), (dval, "validation")]
-        backtest_cb = BacktestCallback(dtest, y_test, ts_test, backtest_interval, backtest_metric, output_dir)
         backtest_cb = BacktestCallback(dtest, y_test, ts_test, backtest_interval, backtest_metric, output_dir)
         bst = xgb.train(
             params,
