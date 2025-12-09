@@ -164,7 +164,13 @@ def evaluate_model(
     
     # Compute metrics
     reg_metrics = compute_regression_metrics(y_test, y_pred)
-    dir_metrics = compute_directional_accuracy(y_test, y_pred)
+    
+    # Directional accuracy with percentile-based threshold for better class balance
+    dir_metrics = compute_directional_accuracy(y_test, y_pred, threshold='percentile')
+    
+    # Also compute sign-based for comparison
+    dir_metrics_sign = compute_directional_accuracy(y_test, y_pred, threshold=None)
+    dir_metrics['sign_based_accuracy'] = dir_metrics_sign['directional_accuracy']
     
     # Trading metrics if timestamps available
     if ts_test is not None:

@@ -114,27 +114,50 @@ def compute_regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[s
     }
 
 
-def compute_directional_accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
-    """Compute directional accuracy metrics."""
+def compute_directional_accuracy(
+    y_true: np.ndarray, 
+    y_pred: np.ndarray,
+    threshold: Optional[float] = None
+) -> Dict[str, float]:
+    """Compute directional accuracy metrics.
+    
+    Args:
+        y_true: True returns
+        y_pred: Predicted returns
+        threshold: If None, uses sign-based (any non-zero). 
+                   If provided, classifies as flat if |return| < threshold.
+                   Can also be 'percentile' to auto-compute from data distribution.
+    """
     y_true = np.asarray(y_true).flatten()
     y_pred = np.asarray(y_pred).flatten()
     
-    # Directions: 1 = up, -1 = down, 0 = flat
-    true_dir = np.sign(y_true)
-    pred_dir = np.sign(y_pred)
+    # Auto-compute threshold based on percentiles if requested
+    if threshold == 'percentile':
+        # Use 33rd/67th percentile to create balanced classes
+        threshold = np.percentile(np.abs(y_true), 33)
+    
+    # Classify directions
+    if threshold is None or threshold == 0:
+        # Original behavior: strict sign
+        true_dir = np.sign(y_true)
+        pred_dir = np.sign(y_pred)
+    else:
+        # Threshold-based classification
+        true_dir = np.where(y_true > threshold, 1, np.where(y_true < -threshold, -1, 0))
+        pred_dir = np.where(y_pred > threshold, 1, np.where(y_pred < -threshold, -1, 0))
     
     # Overall accuracy
     correct = (true_dir == pred_dir).sum()
     total = len(true_dir)
     accuracy = correct / total if total > 0 else 0.0
     
-    # Up accuracy
+    # Up accuracy (only on non-flat true movements)
     up_mask = true_dir > 0
     up_correct = ((pred_dir > 0) & up_mask).sum()
     up_total = up_mask.sum()
     up_accuracy = up_correct / up_total if up_total > 0 else 0.0
     
-    # Down accuracy
+    # Down accuracy (only on non-flat true movements)
     down_mask = true_dir < 0
     down_correct = ((pred_dir < 0) & down_mask).sum()
     down_total = down_mask.sum()
@@ -147,6 +170,7 @@ def compute_directional_accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> Dict
         "up_count": int(up_total),
         "down_count": int(down_total),
         "flat_count": int((true_dir == 0).sum()),
+        "threshold_used": float(threshold) if threshold not in [None, 'percentile'] else 0.0,
     }
 
 
