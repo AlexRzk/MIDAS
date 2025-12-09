@@ -21,9 +21,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Use python3 as default `python` binary
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3 1 \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3 1
+# Use python3 as default `python` binary (only set if `python` isn't already installed)
+RUN if ! command -v python >/dev/null 2>&1 ; then \
+            update-alternatives --install /usr/bin/python python /usr/bin/python3 1 ; \
+        else \
+            echo "python already exists, skipping update-alternatives" ; \
+        fi
 
 # Create app directory
 WORKDIR /app
