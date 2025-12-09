@@ -66,12 +66,18 @@ class DatasetInfo:
 
 def discover_features(data_dir: Path = DATA_DIR) -> List[Path]:
     """Discover all feature parquet files."""
-    pattern = "features_*.parquet"
-    files = sorted(data_dir.glob(pattern))
+    # Try normalized files first, then fall back to regular features
+    patterns = ["normalized_features_*.parquet", "features_*.parquet"]
     
-    if not files:
+    files = []
+    for pattern in patterns:
+        files = sorted(data_dir.glob(pattern))
+        if files:
+            break
         # Try nested directory
         files = sorted(data_dir.glob(f"**/{pattern}"))
+        if files:
+            break
     
     logger.info(f"Discovered {len(files)} feature files in {data_dir}")
     return files
