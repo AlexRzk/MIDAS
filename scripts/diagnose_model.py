@@ -24,10 +24,16 @@ def main():
         results = json.load(f)
     
     print("\n--- Training Results ---")
-    print(f"MSE: {results['test_metrics']['mse']:.6f}")
-    print(f"MAE: {results['test_metrics']['mae']:.6f}")
-    print(f"R²: {results['test_metrics']['r2']:.4f}")
-    print(f"Directional Accuracy: {results['test_metrics']['directional_accuracy']:.2%}")
+    print(json.dumps(results, indent=2))
+    
+    # Extract metrics (handle different structures)
+    test_metrics = results.get('test_metrics', results)
+    
+    if 'mse' in test_metrics:
+        print(f"\nMSE: {test_metrics['mse']:.6f}")
+        print(f"MAE: {test_metrics['mae']:.6f}")
+        print(f"R²: {test_metrics['r2']:.4f}")
+        print(f"Directional Accuracy: {test_metrics.get('directional_accuracy', 0):.2%}")
     
     if 'backtest' in results:
         print(f"\n--- Backtest Results ---")
@@ -134,7 +140,8 @@ def main():
     print("="*60)
     
     # Based on directional accuracy
-    if results['test_metrics']['directional_accuracy'] < 0.30:
+    dir_acc = test_metrics.get('directional_accuracy', 0)
+    if dir_acc < 0.30:
         print("\n🔴 CRITICAL: Directional accuracy < 30% (worse than random)")
         print("   Possible causes:")
         print("   1. Target may be inverted (try negating predictions)")
@@ -143,7 +150,8 @@ def main():
         print("   4. Insufficient feature engineering")
     
     # Based on R²
-    if results['test_metrics']['r2'] < 0.1:
+    r2 = test_metrics.get('r2', 0)
+    if r2 < 0.1:
         print("\n⚠️  LOW R²: Model explains < 10% of variance")
         print("   This is somewhat normal for HFT, but suggests:")
         print("   1. Try longer prediction horizons (5-10 steps)")
