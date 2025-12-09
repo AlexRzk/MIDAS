@@ -380,7 +380,7 @@ def run_training_pipeline(
     logger.info(f"  MSE: {test_metrics['regression']['mse']:.6f}")
     logger.info(f"  MAE: {test_metrics['regression']['mae']:.6f}")
     logger.info(f"  R²: {test_metrics['regression']['r2']:.4f}")
-    logger.info(f"  Directional Accuracy: {test_metrics['directional']['accuracy']:.2%}")
+    logger.info(f"  Directional Accuracy: {test_metrics['directional']['directional_accuracy']:.2%}")
     logger.info(f"{'='*40}")
     
     # Feature importance
