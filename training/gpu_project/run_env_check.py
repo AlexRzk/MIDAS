@@ -156,8 +156,9 @@ def check_xgboost_gpu():
             y = np.random.randn(100)
             
             dtrain = xgb.DMatrix(X, label=y)
+            # XGBoost 3.x: use 'hist' with device='cuda' instead of deprecated 'gpu_hist'
             params = {
-                "tree_method": "gpu_hist",
+                "tree_method": "hist",
                 "device": "cuda",
             }
             
@@ -165,13 +166,13 @@ def check_xgboost_gpu():
             bst = xgb.train(params, dtrain, num_boost_round=2)
             del bst
             
-            print_ok("XGBoost GPU support: AVAILABLE")
+            print_ok("XGBoost GPU support: AVAILABLE (tree_method='hist', device='cuda')")
             return True
             
         except Exception as e:
-            if "CUDA" in str(e) or "gpu" in str(e).lower():
+            if "CUDA" in str(e) or "gpu" in str(e).lower() or "cuda" in str(e).lower():
                 print_warn(f"XGBoost GPU not available: {e}")
-                print_warn("Will use CPU for XGBoost (tree_method='hist')")
+                print_warn("Will use CPU for XGBoost (tree_method='hist', device='cpu')")
             else:
                 print_warn(f"XGBoost GPU test failed: {e}")
             return True  # Not a critical failure
@@ -307,9 +308,9 @@ def check_normalization():
     print("\n  Validating normalized data...")
     
     data_paths = [
-        Path("/data/features"),
-        Path("./data/features"),
-        Path("../data/features"),
+        Path("/data/features_normalized"),
+        Path("./data/features_normalized"),
+        Path("../data/features_normalized"),
     ]
     
     data_path = None
@@ -319,10 +320,11 @@ def check_normalization():
             break
     
     if data_path is None:
-        print_warn("No feature data to validate")
+        print_warn("No normalized feature data to validate")
+        print_warn("Run normalization script first")
         return True
     
-    parquet_files = list(data_path.glob("features_*.parquet"))
+    parquet_files = list(data_path.glob("normalized_features_*.parquet"))
     if not parquet_files:
         print_warn("No feature files to validate")
         return True
@@ -373,10 +375,11 @@ def check_normalization():
         print("\n  Checking normalized distributions...")
         
         # Standard scaler features should have mean≈0, std≈1
+        # Note: microprice, last_trade_px, etc. are RAW_PASSTHROUGH and not normalized
         standard_features = [
             "ofi", "ofi_10", "ofi_cumulative",
             "imbalance", "imbalance_1", "imbalance_5",
-            "spread", "spread_bps", "microprice",
+            "spread", "spread_bps",
         ]
         
         for feat in standard_features:
