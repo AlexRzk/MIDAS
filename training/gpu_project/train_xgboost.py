@@ -3,7 +3,7 @@
 XGBoost GPU Training for MIDAS.
 
 Features:
-- GPU-accelerated training (tree_method='gpu_hist')
+- GPU-accelerated training (tree_method='hist' with device='cuda')
 - Hyperparameter tuning with Optuna
 - Feature importance analysis
 - OFI-safe cross-validation
@@ -38,7 +38,7 @@ logger = get_logger("train_xgboost")
 
 DEFAULT_PARAMS = {
     "objective": "reg:squarederror",
-    "tree_method": "hist",  # Use "gpu_hist" if GPU available
+    "tree_method": "hist",  # XGBoost 3.x uses 'hist' for both CPU and GPU
     "device": "cpu",  # Will be updated to "cuda" if GPU available
     "max_depth": 6,
     "learning_rate": 0.1,
@@ -57,12 +57,13 @@ DEFAULT_PARAMS = {
 
 
 def get_gpu_params(base_params: Dict[str, Any]) -> Dict[str, Any]:
-    """Update params for GPU training."""
+    """Update params for GPU training (XGBoost 3.x compatible)."""
     params = base_params.copy()
     
     if check_gpu_availability():
         logger.info("GPU available - enabling GPU training")
-        params["tree_method"] = "gpu_hist"
+        # XGBoost 3.x: use 'hist' with device='cuda' instead of deprecated 'gpu_hist'
+        params["tree_method"] = "hist"
         params["device"] = "cuda"
         # GPU doesn't need n_jobs
         params.pop("n_jobs", None)

@@ -25,9 +25,6 @@ STANDARD_FEATURES: List[str] = [
     "imbalance_5",
     "imbalance_10",
     
-    # Microprice - theoretical mid-price accounting for depth
-    "microprice",
-    
     # Spread metrics - transaction cost indicators
     "spread",
     "spread_bps",
@@ -107,6 +104,9 @@ MINMAX_FEATURES: List[str] = [
 RAW_PASSTHROUGH_FEATURES: List[str] = [
     # Timestamp - used for time alignment
     "ts",
+    
+    # Microprice - theoretical mid-price, kept raw for target/price reference
+    "microprice",
     
     # Raw prices - preserve actual price levels for reconstruction
     "bid_px_01", "bid_px_02", "bid_px_03", "bid_px_04", "bid_px_05",
