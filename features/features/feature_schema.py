@@ -116,6 +116,10 @@ RAW_PASSTHROUGH_FEATURES: List[str] = [
     
     # Midprice raw - keep for reference, use microprice for ML
     "midprice",
+    
+    # Last trade data - raw trade price and quantity
+    "last_trade_px",
+    "last_trade_qty",
 ]
 
 

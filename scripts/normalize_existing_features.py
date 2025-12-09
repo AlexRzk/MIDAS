@@ -68,9 +68,15 @@ def normalize_existing_features(
     manifest_path = scaler_dir / "normalization_manifest.json"
     scalers_exist = manifest_path.exists()
     
-    if scalers_exist and not fit_on_first:
+    # Load existing scalers only if not overwriting and not fitting on first
+    if scalers_exist and not overwrite and not fit_on_first:
         logger.info("loading_existing_scalers", path=str(manifest_path))
         normalizer = FeatureNormalizer.load(scaler_dir)
+    elif scalers_exist and overwrite:
+        logger.info("overwrite_mode_will_refit_scalers", path=str(manifest_path))
+    
+    # Track if we've fitted in this run
+    fitted_in_this_run = False
     
     # Process files
     for i, filepath in enumerate(feature_files):
@@ -99,11 +105,12 @@ def normalize_existing_features(
                 )
             
             # Fit or transform
-            if i == 0 and fit_on_first and not scalers_exist:
-                # First file - fit scalers
+            if i == 0 and fit_on_first and not fitted_in_this_run:
+                # First file - fit scalers (or refit if overwriting)
                 logger.info("fitting_scalers_on_first_file", file=filepath.name)
                 df_normalized = normalizer.fit_transform(df, is_training=True)
                 normalizer.save()
+                fitted_in_this_run = True
                 logger.info("saved_scalers", path=str(scaler_dir))
             else:
                 # Subsequent files - just transform

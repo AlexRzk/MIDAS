@@ -61,7 +61,7 @@ fi
 # 5. Verify normalization
 echo ""
 echo "✅ Step 5: Verify normalized data"
-python3 scripts/run_env_check.py
+python3 training/gpu_project/run_env_check.py
 
 echo ""
 echo "============================================"
