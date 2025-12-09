@@ -12,18 +12,18 @@ FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
 
-# Python and system dependencies
+# Python and system dependencies (install generic python3 packages to support multiple base images)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 \
-    python3.11-venv \
+    python3 \
+    python3-venv \
     python3-pip \
     git \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Use python3.11 as default
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+# Use python3 as default `python` binary
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3 1 \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3 1
 
 # Create app directory
 WORKDIR /app
