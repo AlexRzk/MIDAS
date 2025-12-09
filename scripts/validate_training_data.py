@@ -473,7 +473,7 @@ def main():
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=Path("data/features"),
+        default=Path(__file__).parent.parent / "data" / "features",
         help="Directory containing feature Parquet files",
     )
     parser.add_argument(

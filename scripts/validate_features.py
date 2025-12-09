@@ -17,7 +17,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import polars as pl
@@ -125,7 +125,7 @@ def validate_file(
     report = {
         "file": str(filepath),
         "valid": True,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "errors": [],
         "warnings": [],
         "stats": {},
@@ -290,7 +290,7 @@ def validate_directory(
     """
     report = {
         "directory": str(dir_path),
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "summary": {
             "total_files": 0,
             "validated_files": 0,
@@ -462,8 +462,8 @@ def main():
     args = parser.parse_args()
     
     if not args.dir and not args.sample:
-        # Default to data/features/
-        args.dir = Path("data/features")
+        # Default to data/features/ relative to repo root
+        args.dir = Path(__file__).parent.parent / "data" / "features"
     
     verbose = not args.quiet
     

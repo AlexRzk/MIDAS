@@ -71,5 +71,7 @@ def inspect_features(data_dir: str = "data/features"):
 
 
 if __name__ == "__main__":
-    data_dir = sys.argv[1] if len(sys.argv) > 1 else "data/features"
+    from pathlib import Path
+    default_dir = Path(__file__).parent.parent / "data" / "features"
+    data_dir = sys.argv[1] if len(sys.argv) > 1 else str(default_dir)
     inspect_features(data_dir)
