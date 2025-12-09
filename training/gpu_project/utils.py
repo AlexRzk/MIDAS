@@ -435,3 +435,51 @@ def microseconds_to_datetime(ts: int) -> datetime:
 def datetime_to_microseconds(dt: datetime) -> int:
     """Convert datetime to microsecond timestamp."""
     return int(dt.timestamp() * 1_000_000)
+
+
+# ============================================
+# Experiment Setup
+# ============================================
+
+OUTPUT_DIR = Path("/outputs")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def setup_experiment_dir(experiment_name: str, base_dir: Optional[Path] = None) -> Path:
+    """
+    Create and return an experiment directory with timestamp.
+    
+    Args:
+        experiment_name: Name of the experiment (e.g., 'xgboost', 'tft')
+        base_dir: Base directory for experiments (default: OUTPUT_DIR)
+    
+    Returns:
+        Path to the created experiment directory
+    """
+    if base_dir is None:
+        base_dir = OUTPUT_DIR
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    exp_dir = base_dir / f"{experiment_name}_{timestamp}"
+    exp_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create subdirectories
+    (exp_dir / "models").mkdir(exist_ok=True)
+    (exp_dir / "plots").mkdir(exist_ok=True)
+    (exp_dir / "logs").mkdir(exist_ok=True)
+    
+    return exp_dir
+
+
+def check_gpu_availability() -> bool:
+    """Check if GPU is available for training."""
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except ImportError:
+        return False
+
+
+def get_device_info() -> Dict[str, Any]:
+    """Get detailed device information."""
+    return check_gpu()
