@@ -63,6 +63,10 @@ case "$MODEL" in
     
     xgboost-backtest)
         echo "Starting XGBoost with per-iteration backtest..."
+        # Clear Python cache to ensure latest code is used
+        find training/gpu_project -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+        find training/gpu_project -name "*.pyc" -delete 2>/dev/null || true
+        
         python3 training/gpu_project/train_xgboost.py \
             --data-dir "$DATA_DIR" \
             --output-dir "$OUTPUT_DIR/xgboost_bt_$(date +%Y%m%d_%H%M%S)" \
