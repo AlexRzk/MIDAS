@@ -132,19 +132,27 @@ def compute_directional_accuracy(
     y_pred = np.asarray(y_pred).flatten()
     
     # Auto-compute threshold based on percentiles if requested
+    computed_threshold = None
     if threshold == 'percentile':
-        # Use 33rd/67th percentile to create balanced classes
-        threshold = np.percentile(np.abs(y_true), 33)
+        # Use 33rd percentile to create balanced classes
+        computed_threshold = np.percentile(np.abs(y_true), 33)
+        actual_threshold = computed_threshold
+    elif threshold is not None:
+        actual_threshold = threshold
+        computed_threshold = threshold
+    else:
+        actual_threshold = 0
+        computed_threshold = 0
     
     # Classify directions
-    if threshold is None or threshold == 0:
+    if actual_threshold == 0:
         # Original behavior: strict sign
         true_dir = np.sign(y_true)
         pred_dir = np.sign(y_pred)
     else:
         # Threshold-based classification
-        true_dir = np.where(y_true > threshold, 1, np.where(y_true < -threshold, -1, 0))
-        pred_dir = np.where(y_pred > threshold, 1, np.where(y_pred < -threshold, -1, 0))
+        true_dir = np.where(y_true > actual_threshold, 1, np.where(y_true < -actual_threshold, -1, 0))
+        pred_dir = np.where(y_pred > actual_threshold, 1, np.where(y_pred < -actual_threshold, -1, 0))
     
     # Overall accuracy
     correct = (true_dir == pred_dir).sum()
@@ -170,7 +178,7 @@ def compute_directional_accuracy(
         "up_count": int(up_total),
         "down_count": int(down_total),
         "flat_count": int((true_dir == 0).sum()),
-        "threshold_used": float(threshold) if threshold not in [None, 'percentile'] else 0.0,
+        "threshold_used": float(computed_threshold) if computed_threshold is not None else 0.0,
     }
 
 
