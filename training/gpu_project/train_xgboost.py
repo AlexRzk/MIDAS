@@ -402,8 +402,25 @@ def run_training_pipeline(
     
     # Generate plots
     y_pred = model.predict(X_test)
-    plot_predictions(y_test, y_pred, output_dir / "predictions.png", n_points=1000)
-    plot_feature_importance(importance, output_dir / "feature_importance.png", top_n=20)
+    
+    # plot_predictions(y_true, y_pred, title, filepath, max_points)
+    plot_predictions(
+        y_test, 
+        y_pred, 
+        "XGBoost Predictions",
+        output_dir / "predictions.png",
+        max_points=1000
+    )
+    
+    # plot_feature_importance(feature_names, importance_scores, title, filepath, top_n)
+    importance_scores = np.array([importance[f] for f in feature_names])
+    plot_feature_importance(
+        feature_names,
+        importance_scores,
+        "XGBoost Feature Importance",
+        output_dir / "feature_importance.png",
+        top_n=20
+    )
     
     logger.info(f"\nResults saved to: {output_dir}")
     
