@@ -512,7 +512,11 @@ def run_training_pipeline(
         json.dump(importance, f, indent=2)
     
     # Generate plots
-    y_pred = model.predict(X_test)
+    # Handle both Booster and XGBRegressor
+    if isinstance(model, xgb.Booster):
+        y_pred = model.predict(xgb.DMatrix(X_test))
+    else:
+        y_pred = model.predict(X_test)
     
     # plot_predictions(y_true, y_pred, title, filepath, max_points)
     plot_predictions(
