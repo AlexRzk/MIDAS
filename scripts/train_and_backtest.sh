@@ -1,66 +1,98 @@
 #!/usr/bin/env bash
-# train_and_backtest.sh
+# Simple training script for MIDAS models
 # Usage:
-#   ./scripts/train_and_backtest.sh --model tft --epochs 100 --gpus 1 --batch-size 64
+#   ./scripts/train_and_backtest.sh              # Interactive mode
+#   ./scripts/train_and_backtest.sh xgboost      # Direct run
 
-set -euo pipefail
+set -e
 
 # Defaults
-MODEL_TYPE="tft"
-EPOCHS=100
-BATCH_SIZE=64
-GPUS=1
-DATA_DIR="data/features"
-MODEL_DIR="models"
-LOG_DIR="logs/tensorboard"
+DATA_DIR="data/features_normalized"
+OUTPUT_DIR="outputs"
 
-usage() {
-  echo "Usage: $0 [--model tft|xgboost|lstm|linear] [--epochs N] [--batch-size N] [--gpus N] [--data-dir PATH] [--model-dir PATH]"
-  exit 1
-}
-
-while [[ $# -gt 0 ]]; do
-  case $1 in
-    --model)
-      MODEL_TYPE="$2"; shift 2;;
-    --epochs)
-      EPOCHS="$2"; shift 2;;
-    --batch-size)
-      BATCH_SIZE="$2"; shift 2;;
-    --gpus)
-      GPUS="$2"; shift 2;;
-    --data-dir)
-      DATA_DIR="$2"; shift 2;;
-    --model-dir)
-      MODEL_DIR="$2"; shift 2;;
-    -h|--help)
-      usage;;
-    *)
-      echo "Unknown arg: $1"; usage;;
-  esac
-done
-
-if [[ "$MODEL_TYPE" == "tft" ]]; then
-  docker compose -f docker-compose.training.yml run --rm training \
-    python training/train.py --data-dir /app/$DATA_DIR --model-dir /app/$MODEL_DIR --log-dir /app/$LOG_DIR \
-      --epochs $EPOCHS --batch-size $BATCH_SIZE --gpus $GPUS
-elif [[ "$MODEL_TYPE" == "xgboost" ]]; then
-  docker compose -f docker-compose.training.yml run --rm training \
-    python training/gpu_project/train_xgboost.py --data-dir /app/$DATA_DIR
-elif [[ "$MODEL_TYPE" == "lstm" ]]; then
-  docker compose -f docker-compose.training.yml run --rm training \
-    python training/gpu_project/train_lstm.py --data-dir /app/$DATA_DIR --n-epochs $EPOCHS --batch-size $BATCH_SIZE
-elif [[ "$MODEL_TYPE" == "linear" ]]; then
-  docker compose -f docker-compose.training.yml run --rm training \
-    python training/gpu_project/train_linear.py --model-type ridge --data-dir /app/$DATA_DIR --hyperparameter-search
+# Interactive model selection if no argument provided
+if [ $# -eq 0 ]; then
+    echo "============================================"
+    echo " MIDAS Model Training"
+    echo "============================================"
+    echo ""
+    echo "Select a model to train:"
+    echo "  1) XGBoost (GPU-accelerated, fastest, recommended)"
+    echo "  2) LSTM (PyTorch, GPU)"
+    echo "  3) Linear Ridge (baseline)"
+    echo ""
+    read -p "Enter choice [1-3]: " choice
+    
+    case $choice in
+        1) MODEL="xgboost";;
+        2) MODEL="lstm";;
+        3) MODEL="linear";;
+        *) echo "Invalid choice"; exit 1;;
+    esac
 else
-  echo "Unknown model type: $MODEL_TYPE"; exit 1
+    MODEL="$1"
 fi
 
-# After training, run backtest
-docker compose -f docker-compose.training.yml run --rm backtest \
-  python training/backtest.py --model /app/$MODEL_DIR/best_model.pt --data-dir /app/$DATA_DIR --normalizer /app/$MODEL_DIR/normalizer.json --output /app/reports/backtest_results.csv || \
-  echo "Backtest failed. If model path is different, adjust --model path and retry."
+echo ""
+echo "============================================"
+echo " Training: $MODEL"
+echo "============================================"
+echo "Data: $DATA_DIR"
+echo "Output: $OUTPUT_DIR"
+echo ""
 
-echo "Training and backtest finished. Results saved to reports/"
+# Change to project root
+cd "$(dirname "$0")/.."
+
+# Run training based on model type
+case "$MODEL" in
+    xgboost)
+        echo "Starting XGBoost GPU training..."
+        python3 training/gpu_project/train_xgboost.py \
+            --data-dir "$DATA_DIR" \
+            --output-dir "$OUTPUT_DIR/xgboost_$(date +%Y%m%d_%H%M%S)" \
+            --target-type return \
+            --target-horizon 10 \
+            --train-ratio 0.8
+        ;;
+    
+    xgboost-tuned)
+        echo "Starting XGBoost with hyperparameter tuning..."
+        python3 training/gpu_project/train_xgboost.py \
+            --data-dir "$DATA_DIR" \
+            --output-dir "$OUTPUT_DIR/xgboost_tuned_$(date +%Y%m%d_%H%M%S)" \
+            --hyperparameter-search \
+            --n-trials 50
+        ;;
+    
+    lstm)
+        echo "Starting LSTM training..."
+        python3 training/gpu_project/train_lstm.py \
+            --data-dir "$DATA_DIR" \
+            --n-epochs 100 \
+            --batch-size 256 \
+            --hidden-dim 128
+        ;;
+    
+    linear)
+        echo "Starting Linear (Ridge) training..."
+        python3 training/gpu_project/train_linear.py \
+            --model-type ridge \
+            --data-dir "$DATA_DIR" \
+            --hyperparameter-search
+        ;;
+    
+    *)
+        echo "Unknown model: $MODEL"
+        echo "Available models: xgboost, xgboost-tuned, lstm, linear"
+        exit 1
+        ;;
+esac
+
+echo ""
+echo "============================================"
+echo " Training Complete!"
+echo "============================================"
+echo "Check outputs in: $OUTPUT_DIR/"
+echo ""
 
